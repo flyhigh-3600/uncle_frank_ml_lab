@@ -29,12 +29,39 @@ UFP_GGML_SOURCE_DIR="$root/third_party/ggml" UFP_GGML_BUILD_DIR="$build_dir" \
   cargo run --manifest-path "$root/Cargo.toml" -q -p ufp-cli -- \
   compile "$root/examples/ggml_matmul.ufp" "$ufp_binary"
 actual=$("$ufp_binary")
-expected="out: 58 64 139 154"
+expected="out: [[58, 64], [139, 154]]"
 if [ "$actual" != "$expected" ]; then
   echo "UFP matmul output mismatch: got '$actual', expected '$expected'" >&2
   exit 1
 fi
 echo "UFP ggml matmul end-to-end: ok"
+
+# Exercise the exported output-buffer ABI from a separate C caller.
+cat >"$build_dir/abi-smoke.c" <<'EOF'
+#include <stddef.h>
+#include <stdio.h>
+#include <math.h>
+int ufp_execute(float *output, size_t output_len);
+int main(void) {
+  const float expected[] = {58, 64, 139, 154};
+  float actual[4];
+  if (ufp_execute(actual, 4) != 0) return 1;
+  for (int i = 0; i < 4; ++i) {
+    if (fabsf(actual[i] - expected[i]) > 1e-5f) return 2;
+  }
+  if (ufp_execute(actual, 3) == 0) return 3;
+  puts("native output ABI: ok");
+  return 0;
+}
+EOF
+c++ -x c++ -O2 -DUFP_NO_MAIN -c "$ufp_binary.c" \
+  -I"$root/third_party/ggml/include" -o "$build_dir/ggml-abi.o"
+cc -O2 -c "$build_dir/abi-smoke.c" -o "$build_dir/abi-smoke.o"
+c++ "$build_dir/ggml-abi.o" "$build_dir/abi-smoke.o" \
+  -L"$build_dir/src" -L"$build_dir/src/ggml-cpu" \
+  -Wl,-rpath,"$build_dir/src" -Wl,-rpath,"$build_dir/src/ggml-cpu" \
+  -lggml -lggml-cpu -lggml-base -lm -o "$build_dir/abi-smoke"
+"$build_dir/abi-smoke"
 
 compile_and_check() {
   source=$1
@@ -51,5 +78,5 @@ compile_and_check() {
   echo "$source: ok"
 }
 
-compile_and_check ggml_matrix_ops.ufp ggml-matrix-ops "out: 1 10 23 40"
-compile_and_check ggml_matmul_chain.ufp ggml-matmul-chain "out: 186 447"
+compile_and_check ggml_matrix_ops.ufp ggml-matrix-ops "out: [[1, 10], [23, 40]]"
+compile_and_check ggml_matmul_chain.ufp ggml-matmul-chain "out: [[186], [447]]"

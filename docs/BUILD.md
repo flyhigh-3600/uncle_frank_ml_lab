@@ -46,7 +46,12 @@ cargo run -p ufp-cli -- compile examples/ggml_matmul.ufp /tmp/ufp-matmul
 /tmp/ufp-matmul
 ```
 
-The fixture declares row-major `float<32>` matrices and a zero-argument
+The generated program formats matrices in row form (e.g.
+`out: [[58, 64], [139, 154]]`) and exports the C ABI
+`int ufp_execute(float *output, size_t output_len)`. It uses top-level literal
+matrices as fixed inputs, writes the row-major result, and returns nonzero for
+an invalid output buffer. The smoke script invokes this ABI from a separate C
+caller. The fixture declares row-major `float<32>` matrices and a zero-argument
 `procedure main()`. `ggml_matrix_ops.ufp` additionally exercises nested and
 flat initializers, a typed local, and `+`, `-`, and `.*`; `ggml_matmul_chain.ufp`
 exercises three matrices and a two-step matmul graph. This remains a deliberately
