@@ -11,15 +11,16 @@ test("backend health and editor are available", async ({ page, request }) => {
   await expect(page.locator(".node")).toHaveCount(4);
 });
 
-test("source text can be edited and the run UI reports mock execution", async ({ page }) => {
+test("source text can be edited and run reports API output/events", async ({ page }) => {
   await page.goto("/");
   const source = page.getByRole("textbox", { name: "Plan source" });
   await expect(source).toHaveValue(/input prompt/);
   await source.fill('input prompt = "hello from Playwright";\noutput reply;\npipe prompt.text -> reply.text;');
   await page.getByRole("button", { name: /Run session/i }).click();
   await expect(page.locator("#session-state")).toHaveText(/RUNNING|COMPLETE/);
-  await expect(page.locator("#terminal")).toContainText("Starting local mock session");
-  await expect(page.locator("#terminal")).toContainText("Input");
+  await expect(page.locator("#terminal")).toContainText("output");
+  await expect(page.locator("#terminal")).toContainText("reply: hello from a session");
+  await expect(page.locator("#terminal")).toContainText("eventRunFinished");
 });
 
 test("backend diagnostics show validation or the documented unavailable fallback", async ({ page }) => {
