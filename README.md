@@ -2,8 +2,8 @@
 
 > *"It's alive... and it's overfitting."*
 
-Named after Victor Frankenstein's less responsible cousin. Uncle Frank builds
-things in a lab, and the things he builds cause havoc.
+Uncle Frank is **Frankenstein**—Victor Frankenstein's less responsible cousin.
+He builds things in a lab, and the things he builds cause havoc.
 
 This repo is two projects sharing a slab:
 
@@ -46,6 +46,8 @@ crates/          `.ufp` compiler workspace crates
 CHECKLIST.md      original-brief traceability + acceptance criteria
 TASKS.md          task ledger, epics E0–E9, milestones M0–M5
 Contribute.md     contributor workflow, commit and PR guidelines
+third_party/ggml/ pinned upstream ggml submodule (initialise recursively)
+scripts/         local build helpers
 ```
 
 ## Quickstart (today)
@@ -73,6 +75,9 @@ cargo run -p ufp-cli -- compile examples/text_io.ufp /tmp/text_io
 This is intentionally a small, honest slice: procedures, matrices, portals,
 GGUF, loaders, editor and ggml compilation are not executable yet. See the
 unchecked criteria in `CHECKLIST.md`.
+
+For the pinned ggml dependency and native build instructions, see
+[`docs/BUILD.md`](./docs/BUILD.md).
 
 ## The two file kinds
 

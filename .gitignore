@@ -27,3 +27,6 @@ artifacts/
 .env
 *.log
 /tmp/
+
+# Local third-party builds
+.cache/

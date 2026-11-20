@@ -112,7 +112,7 @@ as GitHub issues.
 | UF-601 | C runtime header: tensor/list/sheet/struct ABI, arena, ownership | L | UF-301 | todo |
 | UF-602 | C codegen: scalars, control flow, structured, string/binary | L | UF-601, UF-303 | todo |
 | UF-603 | Matrix ops → ggml mapping + partitioner (incl. quantized matmul) | L | UF-601 | todo |
-| UF-604 | ggml build integration (vendored by default), deterministic artifacts | M | UF-603 | todo |
+| UF-604 | ggml build integration (vendored by default), deterministic artifacts | M | UF-603 | doing |
 | UF-605 | Fold codegen with fuel + predicate | M | UF-602, UF-304 | todo |
 | UF-606 | Portal → separate translation units + linker | M | UF-602, UF-305 | todo |
 | UF-607 | Compiler driver: clang flags, content-addressed cache, manifest | M | UF-602 | todo |
