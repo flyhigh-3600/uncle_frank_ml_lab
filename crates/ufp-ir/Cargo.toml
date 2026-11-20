@@ -3,3 +3,7 @@ name = "ufp-ir"
 version.workspace = true
 edition.workspace = true
 description = "Graph IR for Uncle Frank's Plan (.ufp)"
+
+[dependencies]
+ufp-syntax = { path = "../ufp-syntax" }
+ufp-types = { path = "../ufp-types" }

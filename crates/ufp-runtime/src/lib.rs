@@ -37,6 +37,13 @@ pub fn run_text_plan(
     plan: &Plan,
     overrides: &BTreeMap<String, String>,
 ) -> Result<RunResult, RunError> {
+    // Lower and validate first so runtime behavior follows the same graph
+    // invariants as other IR consumers, while retaining terminal literal values
+    // from the shallow source plan for this deliberately small executor.
+    ufp_ir::lower_plan(plan).map_err(|errors| {
+        let error = &errors[0];
+        RunError(format!("{}: {}", error.code, error.message))
+    })?;
     if let Some(error) = ufp_types::check_text_terminals(plan).into_iter().next() {
         return Err(RunError(format!("{}: {}", error.code, error.message)));
     }

@@ -693,11 +693,16 @@ dependencies = [
 [[package]]
 name = "ufp-ir"
 version = "0.1.0"
+dependencies = [
+ "ufp-syntax",
+ "ufp-types",
+]
 
 [[package]]
 name = "ufp-runtime"
 version = "0.1.0"
 dependencies = [
+ "ufp-ir",
  "ufp-syntax",
  "ufp-types",
 ]
