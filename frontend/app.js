@@ -1,4 +1,3 @@
-import { samples } from "./samples.js";
 const source = document.querySelector("#source");
 const nums = document.querySelector("#line-numbers");
 let activeFile = "text_io.ufp", selectedNode = "tokenize", speed = 1, timer, runIndex = 0;
@@ -8,7 +7,7 @@ const names = {input:"Input", tokenize:"Tokenize", classify:"Classify", output:"
 function setText(text) { source.value = text; updateLines(); }
 function updateLines() { nums.textContent = Array.from({length: source.value.split("\n").length}, (_,i)=>i+1).join("\n"); }
 function save() { if (activeFile.endsWith(".ufp")) localStorage.setItem(`ufp:${activeFile}`,source.value); updateLines(); }
-function loadFile(file) {
+async function loadFile(file) {
   activeFile=file; document.querySelectorAll(".file").forEach(b=>b.classList.toggle("active",b.dataset.file===file));
   document.querySelector("#crumb-file").textContent=file; document.querySelector("#text-title").textContent=file;
   const inert=file.endsWith(".txt");
@@ -19,8 +18,38 @@ function loadFile(file) {
   source.classList.toggle("inert-source",inert);
   document.querySelector("#validate").disabled=inert;
   document.querySelector("#run").disabled=inert;
-  setText(inert?samples[file]:(localStorage.getItem(`ufp:${file}`) ?? samples[file] ?? samples["text_io.ufp"]));
-  document.querySelector("#validation-label").textContent=inert?"Inert text · not compiled or executable":"Prototype source · no compiler connected";
+  source.value="Loading repository example…"; updateLines();
+  const examplePath=file==="layer_000.ufp"?"layers/layer_000.ufp":file;
+  try {
+    const response=await fetch(`./examples/${examplePath}`);
+    if(!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const actual=await response.text();
+    setText(inert?actual:(localStorage.getItem(`ufp:${file}`) ?? actual));
+    document.querySelector("#validation-label").textContent=inert?"Inert text · not compiled or executable":"Repository example · edits saved locally";
+    document.querySelector("#validation-label").style.color="";
+  } catch(error) {
+    setText(`Could not load bundled example: ${error.message}`);
+    document.querySelector("#validation-label").textContent="Example bundle unavailable";
+    document.querySelector("#validation-label").style.color="#e4a078";
+  }
+}
+async function checkBackend() {
+  const status=document.querySelector("#backend-status"), dot=document.querySelector("#health-dot");
+  try {
+    const health=await fetch("/api/health").then(r=>{if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json()});
+    status.innerHTML=`Backend connected<small>${health.lab} · ${health.version}</small>`;
+    dot.style.background="#67d6a0";
+    const graph=await fetch("/api/graph/demo").then(r=>{if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json()});
+    const validation=await fetch("/api/graph/validate",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(graph)}).then(r=>{if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json()});
+    const messages=[...(validation.errors||[]).map(x=>`ERROR: ${x}`),...(validation.warnings||[]).map(x=>`Warning: ${x}`)];
+    document.querySelector("#wire-status").textContent=`Backend demo graph: ${validation.ok?"valid":"invalid"} · ${validation.order?.length||0} ordered nodes`;
+    if(messages.length) addLog(`<span class="log-time">backend diagnostics</span>${messages.map(x=>`<span class="log-node">${x}</span>`).join("")}`);
+    else addLog(`<span class="log-time">backend</span><span class="log-ok">Demo graph validated by backend</span><span>Not validation of the open UFP file</span>`);
+  } catch(error) {
+    status.innerHTML=`Backend unavailable<small>${error.message}</small>`;
+    dot.style.background="#e4a078";
+    document.querySelector("#wire-status").textContent="Backend graph validation unavailable";
+  }
 }
 function selectNode(id) {
   selectedNode=id; document.querySelectorAll(".node").forEach(n=>n.classList.toggle("selected",n.dataset.node===id));
@@ -48,7 +77,7 @@ document.querySelectorAll(".file").forEach(b=>b.addEventListener("click",()=>loa
 source.addEventListener("input",save);
 source.addEventListener("keydown",e=>{if(e.key==="Tab"){e.preventDefault();const a=source.selectionStart,b=source.selectionEnd;source.setRangeText("  ",a,b,"end");save()}});
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t===b));document.querySelector("#editor").className=`editor view-${b.dataset.view}`}));
-document.querySelector("#validate").addEventListener("click",()=>{const ok=validate();addLog(`<span class="log-time">check</span><span class="${ok?"log-ok":"log-node"}">${ok?"Local shape checks passed":"Local shape check found missing structure"}</span><span>not a compiler validation</span>`)});
+ document.querySelector("#validate").addEventListener("click",()=>{const ok=validate();addLog(`<span class="log-time">check</span><span class="${ok?"log-ok":"log-node"}">${ok?"Local canvas wiring looks connected":"Canvas wiring incomplete"}</span><span>UFP source is not parsed or type-checked</span>`)});
 document.querySelector("#run").addEventListener("click",()=>{if(timer){clearInterval(timer);timer=null;document.querySelector("#session-state").textContent="PAUSED";document.querySelector("#session-state").classList.remove("active");return}runIndex=0;document.querySelectorAll(".node").forEach(n=>n.classList.remove("running"));document.querySelector("#terminal").innerHTML="";document.querySelector("#session-state").textContent="RUNNING";document.querySelector("#session-state").classList.add("active");addLog('<span class="log-time">start</span><span>Starting local mock session</span>');runStep();timer=setInterval(runStep,1000/speed)});
 document.querySelectorAll(".speed button").forEach(b=>b.addEventListener("click",()=>{speed=Number(b.dataset.speed);document.querySelectorAll(".speed button").forEach(x=>x.classList.toggle("selected",x===b));if(timer){clearInterval(timer);timer=setInterval(runStep,1000/speed)}}));
 document.querySelector("#clear-log").addEventListener("click",()=>document.querySelector("#terminal").innerHTML='<div class="log-muted">Session log cleared.</div>');
@@ -70,6 +99,6 @@ function drawWires(){const svg=document.querySelector("#wires"),rect=canvas.getB
 document.querySelector("#node-name").addEventListener("input",e=>{if(selectedNode==="tokenize")document.querySelector(".node[data-node='tokenize'] .node-body b").textContent=e.target.value});
 document.querySelector("#lowercase").addEventListener("change",e=>document.querySelector(".node[data-node='tokenize'] .node-body small").textContent=`lowercase · ${e.target.checked}`);
 document.querySelector("#portal-open").addEventListener("click",()=>{loadFile("layer_000.ufp");document.querySelector(".file[data-file='layer_000.ufp']").scrollIntoView?.({block:"nearest"});});
-document.querySelector("#new-file").addEventListener("click",()=>{const name=prompt("New local UFP filename","untitled.ufp");if(!name)return;const file=name.endsWith(".ufp")?name:`${name}.ufp`;const nav=document.querySelector(".file-list"),b=document.createElement("button");b.className="file";b.dataset.file=file;b.innerHTML=`<span class="file-icon purple">◇</span>${file}<span class="file-type">UFP</span>`;b.onclick=()=>loadFile(file);nav.insertBefore(b,nav.querySelector(".inert-group"));samples[file]=`input prompt = "hello";\noutput reply;\npipe prompt.text -> reply.text;`;loadFile(file)});
+ document.querySelector("#new-file").addEventListener("click",()=>{const name=prompt("New local UFP filename","untitled.ufp");if(!name)return;const file=name.endsWith(".ufp")?name:`${name}.ufp`;const nav=document.querySelector(".file-list"),b=document.createElement("button");b.className="file";b.dataset.file=file;b.innerHTML=`<span class="file-icon purple">◇</span>${file}<span class="file-type">UFP</span>`;b.onclick=()=>loadFile(file);nav.insertBefore(b,nav.querySelector(".inert-group"));localStorage.setItem(`ufp:${file}`,'input prompt = "hello";\noutput reply;\npipe prompt.text -> reply.text;');loadFile(file)});
 document.querySelectorAll(".node").forEach(n=>n.addEventListener("dragend",drawWires));
-window.addEventListener("resize",drawWires);loadFile(activeFile);requestAnimationFrame(drawWires);
+ window.addEventListener("resize",drawWires);loadFile(activeFile);checkBackend();requestAnimationFrame(drawWires);
