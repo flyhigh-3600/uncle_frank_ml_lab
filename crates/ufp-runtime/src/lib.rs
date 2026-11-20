@@ -262,17 +262,26 @@ fn lower_procedure_body(
                 }
             }
             SyntaxKind::If => lower_if_region(source, statement, portal_links, procedure_name, &mut graph)?,
-            SyntaxKind::Let | SyntaxKind::Assign | SyntaxKind::Return | SyntaxKind::ExpressionStatement => {
-                if let Some(ufp_syntax::Expr { kind: ExprKind::RunUntil { value, condition }, .. }) = statement.expression.as_ref() {
-                    lower_fold_region(value, condition, statement.span, &mut graph);
+            SyntaxKind::Let | SyntaxKind::Assign => {
+                if let Some(ufp_syntax::Expr { kind: ExprKind::RunUntil { value, condition }, span: fold_span }) = statement.expression.as_ref() {
+                    let target = assignment_target(statement).ok_or_else(|| RunError("run-until must assign to a simple named variable".into()))?;
+                    lower_fold_region(source, value, condition, *fold_span, &target, &mut graph)?;
                 } else if statement.expression.as_ref().is_some_and(contains_fold) {
                     return Err(RunError(format!("unsupported nested fold expression in procedure `{procedure_name}`")));
                 } else {
-                    return Err(RunError(format!(
-                        "unsupported {:?} expression/statement in procedure `{procedure_name}`",
-                        statement.kind
-                    )));
+                    let target = assignment_target(statement).ok_or_else(|| RunError("assignment must target a simple named variable".into()))?;
+                    let expression = statement.expression.as_ref().ok_or_else(|| RunError("assignment has no expression".into()))?;
+                    let id = format!("assign_{}", statement.span.start);
+                    graph.nodes.push(control_node(&id, "assignment", ufp_ir::NodeKind::Operation, vec![], vec![], statement.span));
+                    graph.metadata.insert(format!("{id}.target"), target);
+                    graph.metadata.insert(format!("{id}.expression"), source.get(expression.span.start..expression.span.end).unwrap_or_default().trim().into());
                 }
+            }
+            SyntaxKind::Return | SyntaxKind::ExpressionStatement => {
+                return Err(RunError(format!(
+                    "unsupported {:?} expression in procedure `{procedure_name}`",
+                    statement.kind
+                )));
             }
             _ => return Err(RunError(format!(
                 "unsupported {:?} statement in procedure `{procedure_name}`; only node declarations and pipes are currently lowerable",
@@ -344,9 +353,14 @@ fn lower_if_region(
                     }],
                     expr.span,
                 );
-                region
-                    .metadata
-                    .insert(format!("{pred_id}.expression"), format!("{:?}", expr.kind));
+                region.metadata.insert(
+                    format!("{pred_id}.expression"),
+                    source
+                        .get(expr.span.start..expr.span.end)
+                        .unwrap_or_default()
+                        .trim()
+                        .into(),
+                );
                 region
                     .metadata
                     .insert(format!("{branch_id}.mode"), mode.into());
@@ -498,15 +512,39 @@ fn lower_nested_region(
             ufp_syntax::SyntaxKind::Let | ufp_syntax::SyntaxKind::Assign => {
                 if let Some(ufp_syntax::Expr {
                     kind: ufp_syntax::ExprKind::RunUntil { value, condition },
-                    ..
+                    span: fold_span,
                 }) = statement.expression.as_ref()
                 {
-                    lower_fold_region(value, condition, statement.span, &mut graph);
+                    let target = assignment_target(statement).ok_or_else(|| {
+                        RunError("run-until must assign to a simple named variable".into())
+                    })?;
+                    lower_fold_region(source, value, condition, *fold_span, &target, &mut graph)?;
                 } else {
-                    return Err(RunError(format!(
-                        "unsupported {:?} inside conditional region",
-                        statement.kind
-                    )));
+                    let target = assignment_target(statement).ok_or_else(|| {
+                        RunError("assignment must target a simple named variable".into())
+                    })?;
+                    let expression = statement
+                        .expression
+                        .as_ref()
+                        .ok_or_else(|| RunError("assignment has no expression".into()))?;
+                    let id = format!("assign_{}", statement.span.start);
+                    graph.nodes.push(control_node(
+                        &id,
+                        "assignment",
+                        ufp_ir::NodeKind::Operation,
+                        vec![],
+                        vec![],
+                        statement.span,
+                    ));
+                    graph.metadata.insert(format!("{id}.target"), target);
+                    graph.metadata.insert(
+                        format!("{id}.expression"),
+                        source
+                            .get(expression.span.start..expression.span.end)
+                            .unwrap_or_default()
+                            .trim()
+                            .into(),
+                    );
                 }
             }
             _ => {
@@ -527,6 +565,26 @@ fn pipe_endpoint(expr: &ufp_syntax::Expr) -> Result<(String, String), RunError> 
         }
     }
     Err(RunError("pipe endpoint must be `node.port`".into()))
+}
+
+fn assignment_target(statement: &ufp_syntax::SyntaxNode) -> Option<String> {
+    if let Some(name) = statement
+        .children
+        .iter()
+        .find(|n| n.kind == ufp_syntax::SyntaxKind::Identifier)
+        .and_then(|n| n.token.as_ref())
+        .map(|t| t.text.clone())
+    {
+        return Some(name);
+    }
+    let lhs = statement
+        .children
+        .iter()
+        .find_map(|n| n.expression.as_ref())?;
+    match &lhs.kind {
+        ufp_syntax::ExprKind::Identifier(name) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 fn lower_node_for_region(
@@ -606,12 +664,20 @@ fn lower_node_for_region(
 }
 
 fn lower_fold_region(
+    source: &str,
     value: &ufp_syntax::Expr,
     condition: &ufp_syntax::Expr,
     span: ufp_syntax::Span,
+    target: &str,
     graph: &mut ufp_ir::Graph,
-) {
+) -> Result<(), RunError> {
     let id = format!("fold_{}", span.start);
+    let complete = source.get(span.start..span.end).unwrap_or_default();
+    let initial = complete
+        .split_once("run")
+        .map(|(initial, _)| initial.trim())
+        .filter(|initial| !initial.is_empty())
+        .ok_or_else(|| RunError("run-until must have an initial state before `run`".into()))?;
     let body = control_node(
         &format!("{id}_body"),
         "fold-body",
@@ -647,12 +713,21 @@ fn lower_fold_region(
         nodes: vec![body, predicate],
         ..Default::default()
     };
-    region
-        .metadata
-        .insert("fold.value_expression".into(), format!("{:?}", value.kind));
+    region.metadata.insert(
+        "fold.value_expression".into(),
+        source
+            .get(value.span.start..value.span.end)
+            .unwrap_or_default()
+            .trim()
+            .into(),
+    );
     region.metadata.insert(
         "fold.condition_expression".into(),
-        format!("{:?}", condition.kind),
+        source
+            .get(condition.span.start..condition.span.end)
+            .unwrap_or_default()
+            .trim()
+            .into(),
     );
     graph.nodes.push(ufp_ir::Node {
         id: id.clone(),
@@ -692,6 +767,11 @@ fn lower_fold_region(
         format!("{id}.execution_order"),
         "body_then_condition".into(),
     );
+    graph.metadata.insert(format!("{id}.target"), target.into());
+    graph
+        .metadata
+        .insert(format!("{id}.initial"), initial.into());
+    Ok(())
 }
 
 fn control_node(
@@ -983,6 +1063,267 @@ pub struct RunResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunError(pub String);
 
+/// Values supported by the deliberately small control-flow IR interpreter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScalarValue {
+    Bool(bool),
+    Int(i64),
+    String(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlRunResult {
+    pub values: BTreeMap<String, ScalarValue>,
+    pub events: Vec<String>,
+}
+
+/// Execute the supported scalar subset of lowered procedure control flow:
+/// integer/bool/string literals, named scalar inputs, `.` in folds, unary `-`
+/// and `not`, integer arithmetic/comparisons, boolean `and`/`or`, and equality.
+/// `fuel` overrides each fold's metadata budget; `None` uses its recorded
+/// default. Calls, floats, structured values, and operation/portal execution
+/// produce an explicit `RunError`.
+pub fn execute_control_graph(
+    graph: &ufp_ir::Graph,
+    inputs: &BTreeMap<String, ScalarValue>,
+    fuel: Option<usize>,
+) -> Result<ControlRunResult, RunError> {
+    let mut values = inputs.clone();
+    let mut events = Vec::new();
+    execute_graph(graph, &mut values, &mut events, fuel)?;
+    Ok(ControlRunResult { values, events })
+}
+
+fn execute_graph(
+    graph: &ufp_ir::Graph,
+    values: &mut BTreeMap<String, ScalarValue>,
+    events: &mut Vec<String>,
+    fuel_override: Option<usize>,
+) -> Result<(), RunError> {
+    for node in &graph.nodes {
+        if node.name == "if-region" {
+            let region = node
+                .region
+                .as_ref()
+                .ok_or_else(|| RunError("if region is missing nested graph".into()))?;
+            let branches = region
+                .metadata
+                .get(&format!("{}.branches", node.id))
+                .cloned()
+                .unwrap_or_default();
+            let mut selected = false;
+            for branch_id in branches.split(',').filter(|s| !s.is_empty()) {
+                let branch = region
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == branch_id)
+                    .ok_or_else(|| RunError(format!("branch region `{branch_id}` is missing")))?;
+                if branch.name == "else" {
+                    if let Some(body) = &branch.region {
+                        execute_graph(body, values, events, fuel_override)?;
+                    }
+                    events.push(format!("branch:{branch_id}"));
+                    selected = true;
+                    break;
+                }
+                let predicate_id = branch_id.replace("_branch_", "_predicate_");
+                let expression = region
+                    .metadata
+                    .get(&format!("{predicate_id}.expression"))
+                    .ok_or_else(|| {
+                        RunError(format!("predicate `{predicate_id}` has no expression"))
+                    })?;
+                match eval_source(expression, values, None)? {
+                    ScalarValue::Bool(true) => {
+                        if let Some(body) = &branch.region {
+                            execute_graph(body, values, events, fuel_override)?;
+                        }
+                        events.push(format!("branch:{branch_id}"));
+                        selected = true;
+                        break;
+                    }
+                    ScalarValue::Bool(false) => {}
+                    _ => {
+                        return Err(RunError(format!(
+                            "predicate `{predicate_id}` did not evaluate to bool"
+                        )))
+                    }
+                }
+            }
+            if !selected {
+                events.push(format!("branch:{}:none", node.id));
+            }
+        } else if node.kind == ufp_ir::NodeKind::Fold {
+            execute_fold(graph, node, values, events, fuel_override)?;
+        } else if let Some(target) = graph.metadata.get(&format!("{}.target", node.id)) {
+            if let Some(expression) = graph.metadata.get(&format!("{}.expression", node.id)) {
+                let value = eval_source(expression, values, None)?;
+                values.insert(target.clone(), value);
+            }
+        } else if node.kind == ufp_ir::NodeKind::Operation || node.kind == ufp_ir::NodeKind::Portal
+        {
+            return Err(RunError(format!(
+                "scalar control interpreter cannot execute operation/portal node `{}`",
+                node.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn execute_fold(
+    graph: &ufp_ir::Graph,
+    node: &ufp_ir::Node,
+    values: &mut BTreeMap<String, ScalarValue>,
+    events: &mut Vec<String>,
+    fuel_override: Option<usize>,
+) -> Result<(), RunError> {
+    let metadata = node
+        .region
+        .as_ref()
+        .ok_or_else(|| RunError(format!("fold `{}` has no region", node.id)))?;
+    let initial = graph
+        .metadata
+        .get(&format!("{}.initial", node.id))
+        .ok_or_else(|| RunError(format!("fold `{}` has no initial state", node.id)))?;
+    let target = graph
+        .metadata
+        .get(&format!("{}.target", node.id))
+        .ok_or_else(|| RunError(format!("fold `{}` has no assignment target", node.id)))?;
+    let step = metadata
+        .metadata
+        .get("fold.value_expression")
+        .ok_or_else(|| RunError(format!("fold `{}` has no step expression", node.id)))?;
+    let condition = metadata
+        .metadata
+        .get("fold.condition_expression")
+        .ok_or_else(|| RunError(format!("fold `{}` has no condition expression", node.id)))?;
+    let default_fuel = graph
+        .metadata
+        .get(&format!("{}.fuel", node.id))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10_000);
+    let limit = fuel_override.unwrap_or(default_fuel);
+    let mut state = eval_source(initial, values, None)?;
+    for iteration in 1..=limit {
+        state = eval_source(step, values, Some(&state))?;
+        match eval_source(condition, values, Some(&state))? {
+            ScalarValue::Bool(true) => {
+                values.insert(target.clone(), state);
+                events.push(format!("fold:{}:{iteration}", node.id));
+                return Ok(());
+            }
+            ScalarValue::Bool(false) => {}
+            _ => {
+                return Err(RunError(format!(
+                    "fold `{}` condition did not evaluate to bool",
+                    node.id
+                )))
+            }
+        }
+    }
+    Err(RunError(format!(
+        "fold `{}` exhausted fuel {limit}",
+        node.id
+    )))
+}
+
+fn eval_source(
+    source: &str,
+    values: &BTreeMap<String, ScalarValue>,
+    current: Option<&ScalarValue>,
+) -> Result<ScalarValue, RunError> {
+    let expression = ufp_syntax::parse_expression(source).map_err(|e| {
+        RunError(format!(
+            "unsupported expression `{source}`: {}",
+            e[0].message
+        ))
+    })?;
+    eval_expr(&expression, values, current)
+}
+
+fn eval_expr(
+    expr: &ufp_syntax::Expr,
+    values: &BTreeMap<String, ScalarValue>,
+    current: Option<&ScalarValue>,
+) -> Result<ScalarValue, RunError> {
+    use ufp_syntax::ExprKind;
+    match &expr.kind {
+        ExprKind::Literal(value) if value == "true" => Ok(ScalarValue::Bool(true)),
+        ExprKind::Literal(value) if value == "false" => Ok(ScalarValue::Bool(false)),
+        ExprKind::Literal(value) => {
+            if let Ok(v) = value.parse::<i64>() {
+                return Ok(ScalarValue::Int(v));
+            }
+            if value == "null" {
+                return Err(RunError(
+                    "null is outside the scalar interpreter subset".into(),
+                ));
+            }
+            Ok(ScalarValue::String(value.clone()))
+        }
+        ExprKind::Identifier(name) => values
+            .get(name)
+            .cloned()
+            .ok_or_else(|| RunError(format!("unknown scalar value `{name}`"))),
+        ExprKind::Current => current
+            .cloned()
+            .ok_or_else(|| RunError("`.` is only supported inside a fold expression".into())),
+        ExprKind::Condition(value) => eval_expr(value, values, current),
+        ExprKind::Unary { op, value } => {
+            let value = eval_expr(value, values, current)?;
+            match (op.as_str(), value) {
+                ("not", ScalarValue::Bool(v)) => Ok(ScalarValue::Bool(!v)),
+                ("-", ScalarValue::Int(v)) => v
+                    .checked_neg()
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer overflow".into())),
+                _ => Err(RunError(format!(
+                    "unsupported unary operation `{op}` for this scalar value"
+                ))),
+            }
+        }
+        ExprKind::Binary { op, left, right } => {
+            let left = eval_expr(left, values, current)?;
+            let right = eval_expr(right, values, current)?;
+            match (op.as_str(), left, right) {
+                ("+", ScalarValue::Int(a), ScalarValue::Int(b)) => a
+                    .checked_add(b)
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer overflow".into())),
+                ("-", ScalarValue::Int(a), ScalarValue::Int(b)) => a
+                    .checked_sub(b)
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer overflow".into())),
+                ("*", ScalarValue::Int(a), ScalarValue::Int(b)) => a
+                    .checked_mul(b)
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer overflow".into())),
+                ("/", ScalarValue::Int(_), ScalarValue::Int(0))
+                | ("%", ScalarValue::Int(_), ScalarValue::Int(0)) => {
+                    Err(RunError("division by zero".into()))
+                }
+                ("/", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Int(a / b)),
+                ("%", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Int(a % b)),
+                ("==", a, b) => Ok(ScalarValue::Bool(a == b)),
+                ("!=", a, b) => Ok(ScalarValue::Bool(a != b)),
+                ("<", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a < b)),
+                ("<=", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a <= b)),
+                (">", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a > b)),
+                (">=", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a >= b)),
+                ("and", ScalarValue::Bool(a), ScalarValue::Bool(b)) => {
+                    Ok(ScalarValue::Bool(a && b))
+                }
+                ("or", ScalarValue::Bool(a), ScalarValue::Bool(b)) => Ok(ScalarValue::Bool(a || b)),
+                _ => Err(RunError(format!("unsupported scalar operands for `{op}`"))),
+            }
+        }
+        _ => Err(RunError(
+            "expression is outside the scalar interpreter subset".into(),
+        )),
+    }
+}
+
 /// Run the direct `input.text -> output.text` graph.
 ///
 /// `overrides` are transient session values: callers may supply them without
@@ -1214,11 +1555,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("root.ufp"),
-            "procedure main(input string prompt) { let x = prompt; }",
+            "procedure main(input string prompt) { return prompt; }",
         )
         .unwrap();
         let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
-        assert!(error.0.contains("unsupported"));
+        assert!(error.0.contains("unsupported"), "{error:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1342,6 +1683,55 @@ mod tests {
             "condition_unmet"
         );
         assert_eq!(module.graph.metadata[&format!("{}.fuel", fold.id)], "10000");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scalar_interpreter_selects_true_and_false_branches_and_merges_values() {
+        let root =
+            std::env::temp_dir().join(format!("ufp-control-branches-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ufp"),
+            r#"
+            procedure main(input bool flag) {
+                if (flag) { let answer = 1; } else { let answer = 2; }
+            }
+        "#,
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("main.ufp")).unwrap();
+        let mut inputs = BTreeMap::new();
+        inputs.insert("flag".into(), ScalarValue::Bool(true));
+        let yes = execute_control_graph(&graph.ir.modules[0].graph, &inputs, None).unwrap();
+        assert_eq!(yes.values["answer"], ScalarValue::Int(1));
+        inputs.insert("flag".into(), ScalarValue::Bool(false));
+        let no = execute_control_graph(&graph.ir.modules[0].graph, &inputs, None).unwrap();
+        assert_eq!(no.values["answer"], ScalarValue::Int(2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scalar_interpreter_runs_until_condition_or_reports_fuel_exhaustion() {
+        let root = std::env::temp_dir().join(format!("ufp-control-fold-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ufp"),
+            r#"
+            procedure main() { let count = 0 run(. + 1 until (condition(. >= 3))); }
+        "#,
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("main.ufp")).unwrap();
+        let module_graph = &graph.ir.modules[0].graph;
+        let result = execute_control_graph(module_graph, &BTreeMap::new(), None).unwrap();
+        assert_eq!(result.values["count"], ScalarValue::Int(3));
+        assert!(
+            execute_control_graph(module_graph, &BTreeMap::new(), Some(2))
+                .unwrap_err()
+                .0
+                .contains("exhausted fuel 2")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
