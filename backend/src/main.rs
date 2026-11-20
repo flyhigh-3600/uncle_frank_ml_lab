@@ -42,6 +42,10 @@ async fn main() {
         .route("/api/graph/demo", get(api::demo))
         .route("/api/graph/validate", post(api::validate_graph))
         .route("/api/graph/run", post(api::run_graph))
+        .route("/api/ufp/parse", post(api::ufp_parse))
+        .route("/api/ufp/check", post(api::ufp_check))
+        .route("/api/ufp/run", post(api::ufp_run))
+        .route("/api/ufp/examples/{name}", get(api::ufp_example))
         .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index)))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
