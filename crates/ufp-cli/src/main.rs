@@ -1,9 +1,9 @@
 //! `ufp` — command-line driver for Uncle Frank's Plan.
 
-use std::{env, fs, process::ExitCode};
+use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 fn usage() {
-    eprintln!("usage: ufp <tokens|parse> <file.ufp>");
+    eprintln!("usage: ufp <tokens|parse|run|compile> <file.ufp> [--set name=text] | ufp compile <file.ufp> <output>");
 }
 
 fn main() -> ExitCode {
@@ -38,12 +38,76 @@ fn main() -> ExitCode {
             }
             Err(diagnostics) => print_errors(&path, &diagnostics),
         },
+        "run" => run(&path, &source, args),
+        "compile" => compile(&path, &source, args),
         _ => {
             usage();
             ExitCode::from(2)
         }
     }
 }
+
+fn compile(path: &str, source: &str, mut args: impl Iterator<Item = String>) -> ExitCode {
+    let Some(output) = args.next() else {
+        eprintln!("ufp: compile requires output path");
+        return ExitCode::from(2);
+    };
+    if args.next().is_some() {
+        eprintln!("ufp: compile accepts one output path");
+        return ExitCode::from(2);
+    }
+    let plan = match ufp_syntax::parse_plan(source) {
+        Ok(plan) => plan,
+        Err(diagnostics) => return print_errors(path, &diagnostics),
+    };
+    match ufp_codegen::compile_text_plan(&plan, std::path::Path::new(&output)) {
+        Ok(()) => {
+            println!("compiled {output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{path}: compile: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run(path: &str, source: &str, args: impl Iterator<Item = String>) -> ExitCode {
+    let plan = match ufp_syntax::parse_plan(source) {
+        Ok(plan) => plan,
+        Err(diagnostics) => return print_errors(path, &diagnostics),
+    };
+    let mut overrides = BTreeMap::new();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        if arg != "--set" {
+            eprintln!("ufp: unknown run option `{arg}`");
+            return ExitCode::from(2);
+        }
+        let Some(binding) = args.next() else {
+            eprintln!("ufp: --set requires name=text");
+            return ExitCode::from(2);
+        };
+        let Some((name, value)) = binding.split_once('=') else {
+            eprintln!("ufp: --set requires name=text");
+            return ExitCode::from(2);
+        };
+        overrides.insert(name.to_owned(), value.to_owned());
+    }
+    match ufp_runtime::run_text_plan(&plan, &overrides) {
+        Ok(result) => {
+            for (name, text) in result.outputs {
+                println!("{name}: {text}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{path}: runtime: {}", error.0);
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn print_errors(path: &str, diagnostics: &[ufp_syntax::Diagnostic]) -> ExitCode {
     for d in diagnostics {
         eprintln!("{path}:{d}");

@@ -678,12 +678,17 @@ dependencies = [
 name = "ufp-cli"
 version = "0.1.0"
 dependencies = [
+ "ufp-codegen",
+ "ufp-runtime",
  "ufp-syntax",
 ]
 
 [[package]]
 name = "ufp-codegen"
 version = "0.1.0"
+dependencies = [
+ "ufp-syntax",
+]
 
 [[package]]
 name = "ufp-ir"
@@ -692,6 +697,9 @@ version = "0.1.0"
 [[package]]
 name = "ufp-runtime"
 version = "0.1.0"
+dependencies = [
+ "ufp-syntax",
+]
 
 [[package]]
 name = "ufp-syntax"

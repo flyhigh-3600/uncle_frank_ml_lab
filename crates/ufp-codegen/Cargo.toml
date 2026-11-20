@@ -3,3 +3,6 @@ name = "ufp-codegen"
 version.workspace = true
 edition.workspace = true
 description = "C + ggml code generation for Uncle Frank's Plan (.ufp)"
+
+[dependencies]
+ufp-syntax = { path = "../ufp-syntax" }

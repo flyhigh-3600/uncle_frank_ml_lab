@@ -23,9 +23,10 @@ the schedule render as zones, then compile the whole thing and run it.
 | `frank-backend` (toy runtime, JSON graph API) | builds, trains, curses work |
 | `.ufp` normative spec + grammar | drafted (`docs/UFP-SPEC.md`, `docs/grammar.ebnf`) |
 | Cargo workspace | scaffolded (`ufp-syntax`, `ufp-types`, `ufp-ir`, `ufp-runtime`, `ufp-codegen`, `ufp-cli`) |
-| Lexer / parser / type checker | not started |
-| Editor | not started |
-| C + ggml compiler | not started |
+| Lexer / shallow plan parser | in progress (`ufp tokens`, `ufp parse`) |
+| Text-terminal runtime slice | works (`ufp run`) for direct text pipes |
+| Native compilation slice | works (`ufp compile`) for direct text pipes; no ggml yet |
+| Editor / type checker / full IR | not started |
 
 The honest task list is in [`CHECKLIST.md`](./CHECKLIST.md); the index with sizes
 and dependencies is [`TASKS.md`](./TASKS.md).
@@ -58,6 +59,20 @@ cargo run
 ```
 
 Details, graph JSON, and the measured effect of each curse: [`docs/RUNTIME.md`](./docs/RUNTIME.md).
+
+## UFP vertical slice
+
+```sh
+# Parse a plan, run direct input.text → output.text pipes, or emit native C.
+cargo run -p ufp-cli -- parse examples/text_io.ufp
+cargo run -p ufp-cli -- run examples/text_io.ufp --set 'prompt=hello from a session'
+cargo run -p ufp-cli -- compile examples/text_io.ufp /tmp/text_io
+/tmp/text_io
+```
+
+This is intentionally a small, honest slice: procedures, matrices, portals,
+GGUF, loaders, editor and ggml compilation are not executable yet. See the
+unchecked criteria in `CHECKLIST.md`.
 
 ## The two file kinds
 

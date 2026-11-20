@@ -3,3 +3,6 @@ name = "ufp-runtime"
 version.workspace = true
 edition.workspace = true
 description = "Reference interpreter for Uncle Frank's Plan (.ufp)"
+
+[dependencies]
+ufp-syntax = { path = "../ufp-syntax" }

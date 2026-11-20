@@ -10,3 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 ufp-syntax = { path = "../ufp-syntax" }
+ufp-runtime = { path = "../ufp-runtime" }
+ufp-codegen = { path = "../ufp-codegen" }
