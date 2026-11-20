@@ -6,6 +6,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_dir=${1:-"$root/.cache/ggml-build"}
 fixture="$root/crates/ufp-codegen/fixtures/ggml_matmul.c"
 binary="$build_dir/ggml-matmul-smoke"
+ufp_binary="$build_dir/ggml-matmul-ufp"
 
 if [ ! -f "$root/third_party/ggml/CMakeLists.txt" ]; then
   echo "ggml submodule is absent; run: git submodule update --init --recursive" >&2
@@ -23,3 +24,14 @@ c++ -O2 "$fixture" -I"$root/third_party/ggml/include" \
   -Wl,-rpath,"$build_dir/src" -Wl,-rpath,"$build_dir/src/ggml-cpu" \
   -lggml -lggml-cpu -lggml-base -lm -o "$binary"
 "$binary"
+
+UFP_GGML_SOURCE_DIR="$root/third_party/ggml" UFP_GGML_BUILD_DIR="$build_dir" \
+  cargo run --manifest-path "$root/Cargo.toml" -q -p ufp-cli -- \
+  compile "$root/examples/ggml_matmul.ufp" "$ufp_binary"
+actual=$("$ufp_binary")
+expected="out: 58 64 139 154"
+if [ "$actual" != "$expected" ]; then
+  echo "UFP matmul output mismatch: got '$actual', expected '$expected'" >&2
+  exit 1
+fi
+echo "UFP ggml matmul end-to-end: ok"

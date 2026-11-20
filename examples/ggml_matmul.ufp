@@ -1,0 +1,8 @@
+// Narrow native-codegen proof: row-major f32 matrices and one matmul procedure.
+matrix<2>[2,3] of float<32> a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+matrix<2>[3,2] of float<32> b = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+
+procedure main() {
+    let out = a * b;
+    return out;
+}
