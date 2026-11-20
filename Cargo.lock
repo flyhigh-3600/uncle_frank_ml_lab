@@ -675,6 +675,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ufp-cli"
+version = "0.1.0"
+dependencies = [
+ "ufp-syntax",
+]
+
+[[package]]
+name = "ufp-codegen"
+version = "0.1.0"
+
+[[package]]
+name = "ufp-ir"
+version = "0.1.0"
+
+[[package]]
+name = "ufp-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "ufp-syntax"
+version = "0.1.0"
+
+[[package]]
+name = "ufp-types"
+version = "0.1.0"
+
+[[package]]
 name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -10,6 +10,7 @@ plan            = { top_level } EOF ;
 top_level       = import_decl
                 | portal_decl
                 | text_decl
+                | io_decl
                 | procedure_decl
                 | node_decl
                 | pipe_decl
@@ -18,6 +19,12 @@ top_level       = import_decl
 import_decl     = "import" qualified [ "from" STRING ] [ "as" ident ] ";" ;
 portal_decl     = "portal" ident "=" STRING [ "as" ident ] ";" ;
 text_decl       = "text" ident "=" STRING ";" ;          (* .txt attachment: inert *)
+
+(* Text terminals (D-012): an input is the runtime source/trigger, an output
+   is the result sink. Both lower to ordinary procedures with a `text` pin. *)
+io_decl         = input_decl | output_decl ;
+input_decl      = "input" ident "=" text_lit ";" ;
+output_decl     = "output" ident ";" ;
 
 (* ---------- 2. Procedures and pins ---------- *)
 
@@ -151,15 +158,24 @@ annotation_arg  = expr | ident | zone_path ;
 
 zone_path       = INT { "." INT } ;                      (* T(0.1.2) *)
 
-literal         = INT | FLOAT | STRING | "true" | "false" | "null" ;
+literal         = INT | FLOAT | STRING | TEXT_BLOCK | "true" | "false" | "null" ;
+text_lit        = STRING | TEXT_BLOCK ;
 
-(* ---------- 8. Lexical notes ---------- *)
+(* ---------- 8. I/O lowering ---------- *)
+
+(* input  prompt = "…";  ->  procedure prompt(output string text)
+   output reply;         ->  procedure reply(input  string text)
+   Both are ordinary procedures in the IR. The editor view attaches a text box
+   to each: input = editable trigger, output = read-only result. D-012. *)
+
+(* ---------- 9. Lexical notes ---------- *)
 
 (*
    ident        = (letter | "_") { letter | digit | "_" } ;
    INT          = digit { digit } | "0x" hexdigit { hexdigit } ;
    FLOAT        = digit { digit } "." digit { digit } [ exponent ] ;
    STRING       = '"' { escaped_char | char } '"' ;
+   TEXT_BLOCK   = '"""' { any_char } '"""' ;        (* raw: newlines kept *)
    line_comment = "//" { any_char } newline ;
    block_comment= "/*" { any_char } "*/" ;
    whitespace   = space | tab | newline | carriage_return ;
@@ -167,5 +183,9 @@ literal         = INT | FLOAT | STRING | "true" | "false" | "null" ;
    Keywords (reserved): procedure, node, pipe, portal, import, text, graph,
    input, output, inout, with, and, or, not, if, elif, else, return, let,
    run, until, structured, condition, matrix, list, sheet, string, binary,
-   bool, int, float, bfloat, quant, double, true, false, null, auto, as, from, of, T.
+   bool, int, float, bfloat, quant, double, true, false, null, auto, as, from, of.
+
+   `input`/`output` are keywords in both positions: a pin direction inside a
+   procedure signature, and a text terminal at plan level. The parser selects by
+   context (inside `pin_list` vs `top_level`).
 *)

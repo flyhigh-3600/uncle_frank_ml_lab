@@ -1,0 +1,12 @@
+[package]
+name = "ufp-cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line driver for Uncle Frank's Plan (.ufp)"
+
+[[bin]]
+name = "ufp"
+path = "src/main.rs"
+
+[dependencies]
+ufp-syntax = { path = "../ufp-syntax" }

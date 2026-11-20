@@ -1,0 +1,5 @@
+[package]
+name = "ufp-codegen"
+version.workspace = true
+edition.workspace = true
+description = "C + ggml code generation for Uncle Frank's Plan (.ufp)"

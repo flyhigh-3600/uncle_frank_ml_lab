@@ -1,8 +1,7 @@
 // generate.ufp — iteration is a do-until feedback loop, never a general loop.
 // `.`  = current accumulator
-// `..` = enclosing procedure's result
-// Q7 is decided (D-008): inputs come from the left, outputs exit right.
-// Q14 (`..` scope) is still open.
+// `..` = parent lexical scope; `...` = grandparent lexical scope (D-011).
+// D-008: inputs come from the left, outputs exit right.
 
 @T(0)
 procedure generate(

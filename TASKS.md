@@ -18,6 +18,7 @@ as GitHub issues.
 | M2 | Editor | E5 | wire, drill into portals, see T zones |
 | M3 | Native | E6 | C/ggml build matches interpreter |
 | M4 | Demo | E7 | load a GGUF and generate tokens end to end |
+| M5 | Hardening | E8, E9 | conformance corpus, fuzzing, reproducible artifacts, docs |
 
 ---
 
@@ -25,11 +26,12 @@ as GitHub issues.
 
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
-| UF-001 | Cargo workspace: `ufp-syntax`, `ufp-types`, `ufp-ir`, `ufp-runtime`, `ufp-codegen`, `ufp-cli`; keep `frank-backend` as demo | M | — | todo |
+| UF-001 | Cargo workspace: `ufp-syntax`, `ufp-types`, `ufp-ir`, `ufp-runtime`, `ufp-codegen`, `ufp-cli`; keep `frank-backend` as demo | M | — | doing |
 | UF-002 | CI baseline: fmt, clippy, tests, web build | S | UF-001 | todo |
 | UF-003 | Repo hygiene: `.gitignore`, LICENSE decision, CONTRIBUTING, issue/PR templates | S | — | todo |
 | UF-004 | Preserve cursed runtime as reference executor + document its JSON API | S | — | doing |
-| UF-005 | Decision log (`docs/DECISIONS.md`) for Q1–Q15 | S | — | todo |
+| UF-005 | Decision log (`docs/DECISIONS.md`) for Q1–Q15 | S | — | doing |
+| UF-006 | Requirements traceability: checklist, ledger, specs and issues stay in sync | S | — | todo |
 
 ## E1 — Syntax
 
@@ -42,6 +44,7 @@ as GitHub issues.
 | UF-105 | Golden parser tests + AST snapshots | M | UF-103 | todo |
 | UF-106 | Formatter + source↔IR round-trip tests | M | UF-103 | todo |
 | UF-107 | `.txt` attachments: parse, carry, expose as inert notes | S | UF-102 | todo |
+| UF-108 | I/O terminals: `input`/`output` text boxes, trigger/sink lowering | M | UF-102 | doing |
 
 ## E2 — Types & constraints
 
@@ -60,14 +63,16 @@ as GitHub issues.
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
 | UF-301 | IR schema: hierarchical nodes/ports/edges, zones, spans, metadata | M | UF-203 | todo |
-| UF-302 | Lower straight-line procedures and pipes | M | UF-301 | todo |
+| UF-302 | Lower straight-line procedures, pipes, bindings and I/O terminals | M | UF-301 | todo |
 | UF-303 | Lower if/elif/else → predicate/branch/merge | L | UF-302 | todo |
 | UF-304 | Lower `run … until` → bounded do-until fold (gated feedback, fuel) | L | UF-302 | todo |
 | UF-305 | Portal/module resolution, cycle policy, content hashing | L | UF-301 | todo |
 | UF-306 | Lower structured/list/sheet values | M | UF-203, UF-302 | todo |
 | UF-307 | IR validation: types, fan-in, cycles, zone order | M | UF-301 | todo |
 | UF-308 | IR ↔ editor JSON round-trip (positions, nesting, comments) | M | UF-301 | todo |
-| UF-309 | Rust interpreter over IR | L | UF-302 | todo |
+| UF-309 | Rust interpreter over IR (matrix/list/structured, folds, portals, I/O triggers) | L | UF-302 | todo |
+| UF-310 | Trigger protocol: snapshot inputs, fire graph, capture outputs as stable JSON | M | UF-302, UF-309 | todo |
+| UF-311 | Execution observation: bounded lifecycle events, coalescing, presentation-only slow mode | M | UF-309 | todo |
 
 ## E4 — Time zones
 
@@ -78,6 +83,7 @@ as GitHub issues.
 | UF-403 | Auto-inference (ASAP) from data dependencies | M | UF-301, UF-402 | todo |
 | UF-404 | Validation: zone inversion, duplicate paths, races | M | UF-403 | todo |
 | UF-405 | Editor zone rendering: bands, legend, per-zone status | M | UF-501, UF-404 | todo |
+| UF-406 | Strict/relaxed schedule modes in codegen and editor preview | S | UF-402, UF-607 | todo |
 
 ## E5 — Editor
 
@@ -93,6 +99,9 @@ as GitHub issues.
 | UF-508 | Project workspace: file tree, multiple `.ufp`, inert `.txt` notes | M | UF-501 | todo |
 | UF-509 | Compile/run panel: streamed diagnostics, logs, artifacts | M | UF-503, UF-607 | todo |
 | UF-510 | Keyboard shortcuts + accessibility pass | S | UF-507 | todo |
+| UF-513 | Run session: coarse active-block highlighting + speed control | M | UF-509, UF-311 | todo |
+| UF-511 | I/O text boxes: editable input, read-only output, source write-back | M | UF-108, UF-502 | todo |
+| UF-512 | Dual graph/text view kept in sync through the shared IR | M | UF-106, UF-308, UF-502 | todo |
 
 ## E6 — Compiler (C + ggml)
 
@@ -107,6 +116,8 @@ as GitHub issues.
 | UF-607 | Compiler driver: clang flags, content-addressed cache, manifest | M | UF-602 | todo |
 | UF-608 | Differential tests: interpreter vs C/ggml | L | UF-607, UF-309 | todo |
 | UF-609 | Sandbox + capability policy for builtins and generated code | M | UF-607 | todo |
+| UF-610 | Text terminal entrypoint: input parameters, output serialisation, stable exit codes | M | UF-602, UF-607 | todo |
+| UF-611 | Reproducible build: content-addressed artifacts, deterministic toolchain flags | M | UF-607 | todo |
 
 ## E7 — ML utilities & examples
 
@@ -117,6 +128,8 @@ as GitHub issues.
 | UF-703 | `condition` combinators and capture checks | S | UF-204 | todo |
 | UF-704 | Example corpus: one `.ufp` per feature | M | UF-103 | todo |
 | UF-705 | End-to-end demo: load GGUF, run generation fold, inspect tokens | L | UF-604, UF-702, UF-309 | todo |
+| UF-706 | Text-terminal examples: prompt → reply with and without GGUF | S | UF-108, UF-309 | todo |
+| UF-707 | Precision/quantization example: `float<16>`, `bfloat<16>`, `quant<q4_0>` | S | UF-108, UF-201, UF-702 | todo |
 
 ## E8 — QA
 
@@ -127,6 +140,8 @@ as GitHub issues.
 | UF-803 | Lowering snapshot tests (one per rule) | M | UF-303 | todo |
 | UF-804 | Parser fuzzing (cargo-fuzz) | M | UF-104 | todo |
 | UF-805 | CI matrix + release checklist | S | UF-002 | todo |
+| UF-806 | Editor end-to-end tests: drag-drop, portal drill-in, text boxes, zones | M | UF-503, UF-505, UF-511 | todo |
+| UF-807 | Differential text-terminal tests: CLI, interpreter, native entrypoint | S | UF-608, UF-610 | todo |
 
 ## E9 — Docs & community
 
@@ -136,6 +151,7 @@ as GitHub issues.
 | UF-902 | Tutorial: first plan → compile → run | M | UF-309, UF-501 | todo |
 | UF-903 | Architecture & compiler-internals docs | M | UF-301, UF-607 | todo |
 | UF-904 | Contribution guide + roadmap sync | S | UF-003 | todo |
+| UF-905 | Operations guide: backend, CLI, editor, native artifacts | S | UF-004, UF-607 | todo |
 
 ---
 

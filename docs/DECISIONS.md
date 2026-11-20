@@ -122,6 +122,35 @@ tokens are passed back only if the conditions are unmet."
 referenced across scopes with dots (e.g. `..matrices[0]`).
 **Spec:** §3.2, §10.1
 
+### D-012 — input/output are text terminals and run triggers
+**Status:** decided (Frank directive)
+**Decision:** a plan may declare `input name = "<text>";` and `output name;`.
+They are not new types: they lower to ordinary procedures. An input is a
+zero-input procedure with one `text: string` output and is the runtime **source
+and trigger**; an output is a one-input `text: string` procedure with no outputs
+and is the **sink**. The editor opens either as a text box — editable for inputs,
+read-only for outputs — and edits rewrite the source literal. Input is string-only
+for now; multiple terminals are allowed, all inputs fire together, and every
+output must be wired (`UFP3404`). Text boxes may use triple-quoted raw blocks.
+**Rationale:** "input and output procedures which can be opened as text boxes and
+can be used as the source/trigger for the runtime; keep the input as text only
+for now."
+**Spec:** §2.3, §11; UFP-SPEC §6.4, §15.5
+
+### D-013 — run sessions use coarse, opt-in observation
+**Status:** decided (Frank directive)
+**Decision:** clicking Run creates/focuses an interactive terminal session. It
+shows editable text inputs and read-only outputs, then runs from a snapshot of
+those input values. The canvas may highlight the current executing node/block
+from bounded lifecycle events. Normal mode is coarse and low-overhead: no
+per-tensor copies, no rendering on the runtime path, and events may be coalesced.
+A user-controlled slow mode adds delay only *between* events; it does not alter
+program scheduling, values, determinism, fuel, or native output. Fine-grained
+stepping/tracing is opt-in and shares the same event boundaries.
+**Rationale:** interactive visibility is useful, but it must not trade normal
+runtime performance for animation accuracy.
+**Spec:** UFP-SPEC §15.6, §17; SPEC §11
+
 ---
 
 ## Open

@@ -21,7 +21,8 @@ the schedule render as zones, then compile the whole thing and run it.
 | Piece | State |
 |---|---|
 | `frank-backend` (toy runtime, JSON graph API) | builds, trains, curses work |
-| `.ufp` spec + grammar | drafted (`docs/SPEC.md`, `docs/grammar.ebnf`) |
+| `.ufp` normative spec + grammar | drafted (`docs/UFP-SPEC.md`, `docs/grammar.ebnf`) |
+| Cargo workspace | scaffolded (`ufp-syntax`, `ufp-types`, `ufp-ir`, `ufp-runtime`, `ufp-codegen`, `ufp-cli`) |
 | Lexer / parser / type checker | not started |
 | Editor | not started |
 | C + ggml compiler | not started |
@@ -34,13 +35,16 @@ and dependencies is [`TASKS.md`](./TASKS.md).
 ```
 backend/          Rust reference executor (axum + hand-rolled tensors)
 docs/
-  SPEC.md         language & system specification (draft v0.1)
+  UFP-SPEC.md     normative `.ufp` language specification
+  SPEC.md         design/system overview (draft v0.1)
   grammar.ebnf    formal grammar (draft v0.1)
   RUNTIME.md      current backend API and semantics
   DECISIONS.md    decision log (Q1–Q15)
 examples/         aspirational .ufp plans + one inert .txt
-CHECKLIST.md      working checklist with acceptance criteria
-TASKS.md          task ledger, epics E0–E9, milestones M0–M4
+crates/          `.ufp` compiler workspace crates
+CHECKLIST.md      original-brief traceability + acceptance criteria
+TASKS.md          task ledger, epics E0–E9, milestones M0–M5
+Contribute.md     contributor workflow, commit and PR guidelines
 ```
 
 ## Quickstart (today)

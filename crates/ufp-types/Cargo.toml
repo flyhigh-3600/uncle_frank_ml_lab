@@ -1,0 +1,5 @@
+[package]
+name = "ufp-types"
+version.workspace = true
+edition.workspace = true
+description = "Type model and constraint solver for Uncle Frank's Plan (.ufp)"

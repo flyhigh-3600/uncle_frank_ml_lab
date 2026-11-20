@@ -39,6 +39,8 @@ A plan contains:
 - `import` — builtin/utility import (`import_gguf`, tensor helpers, …);
 - `portal` — a reference to another `.ufp` file, exposed as a node;
 - `procedure` — a named function with typed pins;
+- `input` / `output` — text terminals: the runtime trigger and the result sink,
+  opened in the editor as text boxes (§2.3);
 - `node` — an instance of a procedure or portal inside a graph block;
 - `pipe` — a directed edge between two pins;
 - `@T(...)` / other annotations — scheduling and metadata.
@@ -79,6 +81,43 @@ A pipe is a typed channel. Fan-out is allowed (a value may feed many consumers);
 fan-in on a single input pin is not — merge explicitly with a `select`/`merge` node.
 Cycles are illegal in the plain dataflow graph. The only legal cycle is the
 bounded fold described in §4.3.
+
+### 2.3 Input and output terminals
+
+`input` and `output` declare the plan's text terminals (decided, D-012). They are
+ordinary procedures in the IR, not a new type constructor:
+
+```ufp
+input prompt = """
+Uncle Frank, what is alive?
+""";
+
+output reply;
+
+pipe prompt.text -> reply.text;
+```
+
+An `input` lowers to a zero-input procedure with one output pin, `text: string`.
+It is both the **source** and the **trigger**: a run snapshots the text box and
+fires every input terminal. An `output` lowers to a procedure with one input pin,
+`text: string`, and no outputs; it is the **sink** and its box shows whatever
+arrives.
+
+Rules:
+
+- input text is **string-only** in this version. There are no file, image, audio,
+  or model source terminals yet;
+- the input literal is required; `""` is a valid empty box;
+- an output MUST receive exactly one incoming pipe on `reply.text`; an unwired
+  output is a compile error (`UFP3404`);
+- terminal names share the plan namespace and MUST be unique;
+- the editor opens an input as an editable text box and an output as a read-only
+  text box. Editing a box edits the literal in the source — there is no hidden
+  editor-only state;
+- multiple inputs and outputs are allowed. All inputs fire together unless a
+  future `@trigger(...)` annotation narrows the set;
+- text blocks (`"""…"""`) are raw: newlines are preserved and no escapes are
+  processed. Ordinary strings use the escapes in §3 of the grammar notes.
 
 ---
 
@@ -390,6 +429,8 @@ Desugaring rules:
 | indexing | `index` node with checked bounds |
 | `.` / `..` / `...` | static resolution to a binding; no runtime lookup |
 | `Portal` | boundary node; target compiled separately |
+| `input name = "…"` | source procedure: 0 inputs, `text: string` output; run trigger |
+| `output name` | sink procedure: `text: string` input, 0 outputs; captured result |
 | `@T(...)` | zone metadata on nodes/edges; phase barriers |
 
 The IR is the single source of truth: the text formatter prints it, the editor
@@ -439,9 +480,9 @@ Stages:
 2. **Partitioning** — subgraphs whose nodes are all matrix/tensor ops become a
    ggml graph; mixed scalar/control-flow stays in C. The partition boundary is
    materialised as tensor handles.
-3. **ggml mapping** — `@` → `ggml_mul_mat`, `+`/`-` → `ggml_add`/`ggml_sub`,
-   element-wise `*` → `ggml_mul`, transpose/reshape/softmax/rope via the matching
-   ggml ops. Unsupported ops fall back to C (flagged in the build log).
+3. **ggml mapping** — `*` → `ggml_mul_mat`, `.*` → `ggml_mul`, `+`/`-` →
+   `ggml_add`/`ggml_sub`, `/` → `ggml_div`; transpose/reshape/softmax/rope use
+   matching ggml ops. Unsupported ops fall back to C (flagged in the build log).
 4. **Fold codegen** — `run … until` becomes a do-until loop: body first, then the
    predicate; the feedback edge is copied back only on the unmet branch. Fuel is a
    counter, the body is inlined or called, and nothing is allocated per iteration.
@@ -556,10 +597,17 @@ The editor is a view over the IR, not a separate model:
   the exact reason (type mismatch, shape constraint, zone inversion);
 - invalid links are refused, never silently coerced;
 - double-click a `Portal` → open target plan in a nested tab with breadcrumb;
+- double-click an `input`/`output` → open its text box; inputs are editable and
+  act as the run trigger, outputs are read-only result boxes;
 - `@T` zones rendered as bands behind nodes, with a legend and per-zone status;
 - inspector: pins, types, constraints, params, source span, zone;
 - `.txt` files open in a plain notes pane and never enter the graph;
 - compile/run panel streams diagnostics, build logs, and artifact paths;
+- clicking Run opens/focuses an interactive terminal session: editable input
+  text boxes, read-only output boxes, and a Run-with-these-values action;
+- the canvas highlights the current coarse execution block. Normal mode emits
+  bounded node/block events and never copies tensors or blocks execution for
+  rendering; an optional speed control delays only between events (D-013);
 - autosave to local storage; export/import project as JSON + source bundle.
 
 The graph is a DAG by default. When a fold is expanded, its body is shown as a
@@ -583,6 +631,12 @@ nested region with a self-edge labelled `until`.
 ## 13. Worked example
 
 ```ufp
+input prompt = "Why did the tensor cross the road?";
+
+output story;
+
+pipe generate.tokens -> story.text;   // once token decoding is wired
+
 portal qwen = "./qwen3_4b.ufp" as Qwen_3_4b;
 
 @T(0)    procedure generate(input string prompt, output list<int> tokens) {
@@ -612,7 +666,8 @@ and termination is a `condition` over the accumulator. The back-edge is gated on
 ## 14. Open questions (Frank must rule)
 
 Resolved: **Q1** → D-006 (matrix rank), **Q2** → D-007 (`*` = matmul, `.*` = Hadamard),
-**Q7** → D-008 (Verilog-style port chains), **Q14** → D-011 (scope walking).
+**Q7** → D-008 (Verilog-style port chains), **Q14** → D-011 (scope walking),
+**I/O terminals** → D-012 (`input` is the text trigger, `output` the text sink).
 
 - **Q3** `sheet`: dataframe with typed columns? Does it need row mutation?
 - **Q4** "all internal values are integers": are floats bit-cast to ints for

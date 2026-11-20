@@ -1,0 +1,13 @@
+// text_io.ufp — input is the trigger; output is the result box (D-012).
+//
+// The input box supplies a string. Running the plan fires every input and
+// captures whatever reaches each output. For now the terminals are text-only;
+// a real transform replaces the pass-through pipe later.
+
+input prompt = """
+Why did the tensor cross the road?
+""";
+
+output reply;
+
+pipe prompt.text -> reply.text;

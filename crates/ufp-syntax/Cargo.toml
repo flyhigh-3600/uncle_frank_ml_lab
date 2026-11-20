@@ -1,0 +1,5 @@
+[package]
+name = "ufp-syntax"
+version.workspace = true
+edition.workspace = true
+description = "Lexer, AST, and plan parser for Uncle Frank's Plan (.ufp)"

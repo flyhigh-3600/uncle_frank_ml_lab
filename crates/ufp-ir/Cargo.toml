@@ -1,0 +1,5 @@
+[package]
+name = "ufp-ir"
+version.workspace = true
+edition.workspace = true
+description = "Graph IR for Uncle Frank's Plan (.ufp)"

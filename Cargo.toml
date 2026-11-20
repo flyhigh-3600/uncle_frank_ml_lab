@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "backend",
+    "crates/ufp-syntax",
+    "crates/ufp-types",
+    "crates/ufp-ir",
+    "crates/ufp-runtime",
+    "crates/ufp-codegen",
+    "crates/ufp-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
