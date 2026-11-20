@@ -331,6 +331,7 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
                             .type_ast
                             .as_ref()
                             .and_then(|t| type_from_ast(t).ok())
+                            .map(|ty| qualify_dimensions(ty, &format!("procedure::{name}")))
                             .unwrap_or(Type::Auto);
                         let pin_name = pin
                             .children
@@ -346,10 +347,11 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
         }
         if let Some(name) = declaration_name(node) {
             checker.globals.insert(
-                name,
+                name.clone(),
                 node.type_ast
                     .as_ref()
                     .and_then(|t| type_from_ast(t).ok())
+                    .map(|ty| qualify_dimensions(ty, &format!("global::{name}")))
                     .unwrap_or(Type::Auto),
             );
         }
@@ -383,6 +385,36 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
         checker.check_node(node, &mut vec![checker.globals.clone()]);
     }
     checker.diagnostics
+}
+fn qualify_dimensions(ty: Type, namespace: &str) -> Type {
+    let qualify = |d: Dimension| match d {
+        Dimension::Known(n) => Dimension::Known(n),
+        Dimension::Variable(name) => Dimension::Variable(format!("{namespace}::{name}")),
+    };
+    match ty {
+        Type::Matrix { rank, dims, elem } => Type::Matrix {
+            rank,
+            dims,
+            elem: Box::new(qualify_dimensions(*elem, namespace)),
+        },
+        Type::SymbolicMatrix { rank, dims, elem } => Type::SymbolicMatrix {
+            rank: rank.map(&qualify),
+            dims: dims.into_iter().map(qualify).collect(),
+            elem: Box::new(qualify_dimensions(*elem, namespace)),
+        },
+        Type::List(elem) => Type::List(elem.map(|t| Box::new(qualify_dimensions(*t, namespace)))),
+        Type::Sheet(elem) => Type::Sheet(elem.map(|t| Box::new(qualify_dimensions(*t, namespace)))),
+        Type::Structured(fields) => Type::Structured(
+            fields
+                .into_iter()
+                .map(|f| Field {
+                    name: f.name,
+                    ty: qualify_dimensions(f.ty, namespace),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 struct Checker {
@@ -420,10 +452,14 @@ impl Checker {
                     .and_then(|c| c.token.as_ref())
                     .map(|t| t.text.clone())
                     .unwrap_or_default();
+                let namespace = declaration_name(node)
+                    .map(|name| format!("procedure::{name}"))
+                    .unwrap_or_else(|| "procedure::<anonymous>".into());
                 let ty = pin
                     .type_ast
                     .as_ref()
                     .and_then(|t| type_from_ast(t).ok())
+                    .map(|ty| qualify_dimensions(ty, &namespace))
                     .unwrap_or(Type::Auto);
                 if !name.is_empty() {
                     local.last_mut().unwrap().insert(name, ty.clone());
@@ -1188,15 +1224,27 @@ mod tests {
 
     #[test]
     fn symbolic_dimensions_unify_transitively_and_report_one_conflict() {
-        let plan = ufp_syntax::parse_ast(
-            "procedure p(input matrix<2>[n,4] a with a.shape = b.shape and a.shape = c.shape, input matrix<2>[8,4] b, input matrix<2>[9,4] c) {}",
-        ).unwrap();
+        let source = "procedure p(input matrix<2>[n,4] a with a.shape = b.shape and a.shape = c.shape, input matrix<2>[8,4] b, input matrix<2>[9,4] c) {}";
+        let plan = ufp_syntax::parse_ast(source).unwrap();
         let errors = check_ast(&plan);
         assert_eq!(
             errors.iter().map(|d| d.code).collect::<Vec<_>>(),
             vec!["UFP3307"]
         );
         assert!(errors[0].message.contains("shape constraint conflict"));
+        assert_eq!(
+            errors[0].span.start,
+            source.find("a.shape = c.shape").unwrap()
+        );
+    }
+
+    #[test]
+    fn symbolic_names_are_isolated_between_procedures() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure first(input matrix<2>[n,4] a with a.shape = b.shape, input matrix<2>[8,4] b) {} procedure second(input matrix<2>[n,4] a with a.shape = b.shape, input matrix<2>[9,4] b) {}",
+        )
+        .unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
     }
 
     #[test]
