@@ -64,3 +64,23 @@ the same commit.
 3. Update formal spec, grammar and decision log for semantic changes.
 4. Check acceptance boxes only when their exact criteria and tests are met.
 5. Use a focused conventional commit with a UF task ID and push `main`.
+
+## Delegated-task repair protocol
+
+When a delegated task finishes:
+
+1. Inspect its diff, task acceptance boxes, and source/spec consistency.
+2. Run its narrow tests, then `cargo test --workspace`; run frontend/native smoke
+   commands when applicable.
+3. If it passes, merge/cherry-pick its commit into `main`, resolve conflicts
+   explicitly, rerun integration checks, and commit any integration repair.
+4. If it fails, record the exact failing command/output and affected paths in
+   the follow-up prompt. Relaunch or continue the same isolated agent with:
+   - the failed acceptance criteria and task ID;
+   - minimal reproduction/expected behaviour;
+   - files and interfaces it may change;
+   - explicit requirement to add a regression test and commit the repair.
+5. Never merge a “mostly working” branch merely to advance a checklist item.
+
+Each worker owns one worktree/branch. The integrator owns `main`; workers must
+not force-push, modify submodules, or edit unrelated task areas.
