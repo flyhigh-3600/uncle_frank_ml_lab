@@ -111,6 +111,14 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             advance(source, &mut i, &mut line, &mut column);
             continue;
         }
+        // Keep UTF-8 byte spans valid while reporting columns in characters.
+        if !b.is_ascii() {
+            let width = source[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            i += width;
+            column += 1;
+            errors.push(diag("UFP1003", "invalid character", start, i, start_line, start_column));
+            continue;
+        }
         if bytes.get(i..i + 2) == Some(b"//") {
             while i < bytes.len() && bytes[i] != b'\n' {
                 advance(source, &mut i, &mut line, &mut column);
@@ -176,6 +184,7 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     start_line,
                     start_column,
                 ));
+                out.push(token(TokenKind::Error, source[start..i].to_owned(), start, i, start_line, start_column));
             }
             continue;
         }
@@ -217,6 +226,7 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     start_line,
                     start_column,
                 ));
+                out.push(token(TokenKind::Error, source[start..i].to_owned(), start, i, start_line, start_column));
             }
             continue;
         }
@@ -241,11 +251,14 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             let zone_start = source[..start].rfind("@T(");
             let in_zone_path = zone_start.is_some_and(|at| !source[at + 3..start].contains(')'));
             advance(source, &mut i, &mut line, &mut column);
+            let mut malformed_number = false;
             if b == b'0' && matches!(bytes.get(i), Some(b'x' | b'X')) {
                 advance(source, &mut i, &mut line, &mut column);
+                let digits_start = i;
                 while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
                     advance(source, &mut i, &mut line, &mut column);
                 }
+                malformed_number = i == digits_start;
             } else {
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     advance(source, &mut i, &mut line, &mut column);
@@ -264,12 +277,19 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     if matches!(bytes.get(i), Some(b'+' | b'-')) {
                         advance(source, &mut i, &mut line, &mut column);
                     }
+                    let exponent_start = i;
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         advance(source, &mut i, &mut line, &mut column);
                     }
+                    malformed_number = i == exponent_start;
                 }
             }
             let text = source[start..i].to_owned();
+            if malformed_number {
+                errors.push(diag("UFP1004", "malformed numeric literal", start, i, start_line, start_column));
+                out.push(token(TokenKind::Error, text, start, i, start_line, start_column));
+                continue;
+            }
             let kind = if !in_zone_path && text.contains(['.', 'e', 'E']) {
                 TokenKind::Float
             } else {
@@ -697,5 +717,27 @@ mod tests {
     fn accepts_named_nested_matrix() {
         let plan = parse_plan("matrix[2,2] layer = [[1.0, 0.0], [0.0, 1.0]];").unwrap();
         assert_eq!(plan.items.len(), 1);
+    }
+    #[test]
+    fn malformed_lexemes_have_valid_spans_and_recover() {
+        let source = "é 0x 2e+ \"unfinished\noutput ok;";
+        let (tokens, errors) = lex(source);
+        assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["UFP1003", "UFP1004", "UFP1004", "UFP1001"]);
+        for error in &errors {
+            assert!(source.is_char_boundary(error.span.start));
+            assert!(source.is_char_boundary(error.span.end));
+            assert!(error.span.end >= error.span.start);
+        }
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Error));
+        assert!(tokens.iter().any(|t| t.text == "output"));
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_diagnosed_at_opener() {
+        let (tokens, errors) = lex("/* bad");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "UFP1002");
+        assert_eq!((errors[0].span.start, errors[0].span.end), (0, 6));
+        assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
     }
 }
