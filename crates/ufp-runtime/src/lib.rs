@@ -37,6 +37,9 @@ pub fn run_text_plan(
     plan: &Plan,
     overrides: &BTreeMap<String, String>,
 ) -> Result<RunResult, RunError> {
+    if let Some(error) = ufp_types::check_text_terminals(plan).into_iter().next() {
+        return Err(RunError(format!("{}: {}", error.code, error.message)));
+    }
     let mut inputs = BTreeMap::new();
     let mut outputs = BTreeSet::new();
     let mut pipes: Vec<(&Endpoint, &Endpoint)> = Vec::new();

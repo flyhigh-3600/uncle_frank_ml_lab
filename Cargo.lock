@@ -699,6 +699,7 @@ name = "ufp-runtime"
 version = "0.1.0"
 dependencies = [
  "ufp-syntax",
+ "ufp-types",
 ]
 
 [[package]]
@@ -708,6 +709,9 @@ version = "0.1.0"
 [[package]]
 name = "ufp-types"
 version = "0.1.0"
+dependencies = [
+ "ufp-syntax",
+]
 
 [[package]]
 name = "unicase"

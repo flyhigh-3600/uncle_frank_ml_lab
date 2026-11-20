@@ -6,3 +6,4 @@ description = "Reference interpreter for Uncle Frank's Plan (.ufp)"
 
 [dependencies]
 ufp-syntax = { path = "../ufp-syntax" }
+ufp-types = { path = "../ufp-types" }
