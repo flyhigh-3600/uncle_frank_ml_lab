@@ -31,3 +31,21 @@ and verifies source examples exist; no parser/type-checker is implied.
 
 Draft text and session output remain in this browser. Local requests go to the
 same-origin backend and bundled example files.
+# Frontend checks
+
+Run the fast static checks and build with `npm test && npm run build`.
+Browser E2E requires Node/npm, Rust/Cargo (to launch `frank-backend`) and
+Playwright's Chromium browser:
+
+```sh
+npm install
+npx playwright install chromium
+npm run test:e2e
+```
+
+Playwright builds the frontend and starts the backend on `127.0.0.1:8789` by
+default. Override with `FRANK_E2E_PORT` if needed. E2E covers the real health
+endpoint, editor/source interactions, mock session output, backend diagnostics
+(including its explicit fallback), portal layer navigation and inert `.txt`
+behavior. The editor currently has no separate terminal input or compiler/API
+integration; the source textarea and mock Run Session UI are what is exercised.
