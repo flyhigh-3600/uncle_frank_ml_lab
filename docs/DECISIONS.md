@@ -53,22 +53,40 @@ the `.ufp` toolchain is built; interpreter and native output are tested against 
 **Rationale:** gives the project something that runs from day one.
 **Spec:** none (engineering)
 
+### D-006 — `matrix<r>` is the rank; `of` is the element type
+**Status:** decided (Q1)
+**Decision:** `matrix<3>[3,3,3]` is a rank-3 tensor with extents 3×3×3 and float
+elements. Element type is written `of <type>`:
+`matrix<2>[200,2] of double`. Rank is optional; when present it must equal the
+number of extents. The old `matrix<float>[...]` spelling is removed.
+**Rationale:** Frank's ruling: the angle brackets count dimensions.
+**Spec:** §3.1
+
+### D-007 — `*` is matmul; `.*` is element-wise
+**Status:** decided (Q2)
+**Decision:** `a * b` lowers to `ggml_mul_mat`; `.*` to `ggml_mul`; `/` to
+`ggml_div`; `+`/`-` to `ggml_add`/`ggml_sub`. `@` is removed — one spelling per
+operation. Source semantics stay row-major `a·b`; the compiler inserts the
+transposes ggml's `Aᵀ·B` convention needs.
+**Rationale:** Frank's ruling plus ggml's operator set.
+**Spec:** §4.1
+
+### D-008 — port chains are Verilog-style
+**Status:** decided (Q7)
+**Decision:** `f.(a, b) g(c)` invokes `f` with its input port map, wires every
+output of `f` left-to-right into `g`'s leftmost unbound inputs, then lets `g`'s
+outputs exit to the right (expression value / next link). Arguments after `g`
+fill the next free input pins. It does *not* reorder arguments. The named form
+`g(in0 = f(a, b), in1 = c)` is authoritative and always legal.
+**Rationale:** Frank's model — inputs are given from the left, outputs leave from
+the right; the whole thing reads like Verilog module instantiation.
+**Caveat:** if the trailing `(tokens)` was intended as *output naming* rather
+than an input, only the sugar changes; the named form and IR are unaffected.
+**Spec:** §4.4
+
 ---
 
 ## Open
-
-### Q1 — `matrix<3>[3,3]`: rank or element type?
-**Status:** open
-**Options:** (a) `<3>` = rank assertion, canonical `matrix<float>[3,3]`;
-(b) `<3>` = element type (invalid as written); (c) drop `<…>` entirely.
-**Leaning:** (a), with a diagnostic when the assertion disagrees with the dims.
-**Spec:** §3.1
-
-### Q2 — `*` on matrices: element-wise or matmul?
-**Status:** open
-**Options:** NumPy (`*` element-wise, `@` matmul) vs maths (`*` matmul).
-**Leaning:** NumPy rules; `@` is unambiguous.
-**Spec:** §4.1
 
 ### Q3 — `sheet` semantics
 **Status:** open
@@ -98,13 +116,6 @@ locale bugs.
 **Leaning:** explicit-by-default, inferred from free variables with a printed
 capture set in diagnostics.
 **Spec:** §3.4
-
-### Q7 — `f.(a) g(b)` desugaring
-**Status:** open
-**Options:** result becomes `g`'s first free argument; result is threaded as a
-named `it`; operator form `f |> g`.
-**Leaning:** first-free-argument insertion, rendered as an explicit edge.
-**Spec:** §4.4
 
 ### Q8 — portal export naming
 **Status:** open

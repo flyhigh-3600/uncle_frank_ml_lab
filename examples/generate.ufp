@@ -1,7 +1,8 @@
 // generate.ufp — iteration is a bounded fold, never a loop.
 // `.`  = current accumulator
 // `..` = enclosing procedure's result
-// Syntax is provisional (Q7/Q14): the pipe-call sugar is the least settled part.
+// Q7 is decided (D-008): inputs come from the left, outputs exit right.
+// Q14 (`..` scope) is still open.
 
 @T(0)
 procedure generate(

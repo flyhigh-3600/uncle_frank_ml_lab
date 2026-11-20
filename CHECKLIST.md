@@ -21,7 +21,7 @@ nothing else is wired yet.
 - [~] **UF-004** Reference executor documented (`docs/RUNTIME.md`: endpoints, graph JSON, curses)
 - [ ] **UF-101** Lexer
   - [ ] every token in `grammar.ebnf` §8 lexes with accurate spans
-  - [ ] comments, strings, `int<32>`, `matrix<3>[3,3]`, `@T(0.1.2)`, `.`/`..`
+  - [ ] comments, strings, `int<32>`, `matrix<3>[3,3,3]`, `@T(0.1.2)`, `.`/`..`
   - [ ] error tokens never panic; fuzz-safe
 - [ ] **UF-102** Plan-level parser
   - [ ] `import`, `portal`, `text`, `procedure`, `node`, `pipe`, annotations
@@ -61,7 +61,7 @@ nothing else is wired yet.
 
 ## E2 — Types & constraints
 
-- [ ] **UF-201** type model — all §3.1 types, interning, canonical printing
+- [ ] **UF-201** type model — all §3.1 types, interning, canonical printing; `matrix<r>` = rank, `of` = element (D-006)
 - [ ] **UF-202** scopes & symbols — shadowing rules documented and tested
 - [ ] **UF-203** expression typing
   - [ ] index arity = rank; bounds provable → static, else runtime check
@@ -161,13 +161,13 @@ nothing else is wired yet.
 
 ## Decisions waiting on Frank
 
-- [ ] **Q1** `matrix<3>[3,3]` — rank assertion or element type?
-- [ ] **Q2** `*` matrix meaning — element-wise (NumPy) vs matmul?
+- [x] **Q1** `matrix<3>[3,3,3]` — rank is `<r>`, element type via `of` → D-006
+- [x] **Q2** `*` = matmul, `.*` = Hadamard (ggml semantics) → D-007
+- [x] **Q7** `f.(in) g(in)` = Verilog-style port chain → D-008
 - [ ] **Q3** `sheet` — typed columns? row mutation?
 - [ ] **Q4** integer representation of atomics; float comparison semantics
 - [ ] **Q5** `string` ordering: equality only, or lexicographic?
 - [ ] **Q6** `condition` capture rules (value vs reference)
-- [ ] **Q7** exact desugaring of `f.(a) g(b)` (first-free-arg insertion?)
 - [ ] **Q8** portal export naming (`main` vs `export` marker)
 - [ ] **Q9** do T zones imply real parallelism or only legal scheduling?
 - [ ] **Q10** default fuel; `@fuel` scope

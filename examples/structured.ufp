@@ -3,12 +3,12 @@
 // error, while equality is fine.
 
 procedure structured_demo(
-    input  matrix<float>[2,2] a,
-    input  matrix<float>[2,2] b,
+    input  matrix<2>[2,2] a,
+    input  matrix<2>[2,2] b,
     output bool verdict
 ) {
     let x = structured{ int index = 3, string label = "new llm", matrix_var = a };
-    let same = x.matrix_var == b;              // matrix<bool>[2,2]
+    let same = x.matrix_var == b;              // bool matrix [2,2]
 
     // x.label < "z"                             // error: strings are not ordered
     // let bad = x < x;                          // error: label cannot be ordered

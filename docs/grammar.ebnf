@@ -72,14 +72,14 @@ and_expr        = cmp_expr { "and" cmp_expr } ;
 cmp_expr        = add_expr [ cmp_op add_expr ] ;
 cmp_op          = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
 add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
-mul_expr        = unary { ( "*" | "/" | "%" ) unary } ;
+mul_expr        = unary { ( "*" | ".*" | "/" | "%" ) unary } ;
 unary           = [ "-" | "not" | "~" ] postfix ;
 
 postfix         = primary { field_access | index | invoke | call | run_expr } ;
 
 field_access    = "." ident ;
 index           = "[" expr { "," expr } "]" ;
-invoke          = "." "(" [ args ] ")" ;                 (* f.(x): bind pins *)
+invoke          = "." "(" [ args ] ")" ;                 (* f.(x): input port map (D-008) *)
 call            = "(" [ args ] ")" ;                     (* g(x): piped value first *)
 run_expr        = "run" "(" expr "until" "(" expr ")" ")" ;
 
@@ -99,7 +99,7 @@ origin          = ".." ;                                 (* enclosing result *)
 struct_lit      = "structured" "{" [ field_init { "," field_init } ] "}" ;
 field_init      = ( type ident | ident ) [ "=" expr ] ;
 list_lit        = "[" [ expr { "," expr } ] "]" ;
-matrix_lit      = "matrix" [ "<" type ">" ] "[" dim_list "]"
+matrix_lit      = "matrix" [ "<" INT ">" ] "[" dim_list "]" [ "of" type ]
                   "{" [ expr { "," expr } ] "}" ;
 condition_lit   = "condition" "(" expr ")" ;
 
@@ -119,7 +119,7 @@ type            = "bool"
                 | "binary"
                 | "sheet" [ "<" type ">" ]
                 | "list" [ "<" type ">" ]
-                | "matrix" [ "<" ( type | INT ) ">" ] "[" dim_list "]"
+                | "matrix" [ "<" INT ">" ] "[" dim_list "]" [ "of" type ]
                 | "structured" "{" [ field_type { "," field_type } ] "}"
                 | "condition" [ "(" expr ")" ]
                 | ident ;
@@ -129,9 +129,9 @@ dim             = INT | ident | expr ;
 
 field_type      = type ident [ "=" expr ] ;
 
-(* Ambiguity, deliberate and documented (Q1): matrix<3>[3,3] parses with
-   "<3>" as a rank assertion, while matrix<float>[3,3] uses "<float>" as the
-   element type. Canonical form is the latter. *)
+(* Decided (D-006): "<r>" is the rank; the bracket list holds the extents.
+   The element type is written with `of` (default float). matrix<3>[3,3,3]
+   is a rank-3 3x3x3 tensor. *)
 
 (* ---------- 7. Constraints, annotations, literals ---------- *)
 
@@ -158,5 +158,5 @@ literal         = INT | FLOAT | STRING | "true" | "false" | "null" ;
    Keywords (reserved): procedure, node, pipe, portal, import, text, graph,
    input, output, inout, with, and, or, not, if, elif, else, return, let,
    run, until, structured, condition, matrix, list, sheet, string, binary,
-   bool, int, float, double, true, false, null, auto, as, from, T.
+   bool, int, float, double, true, false, null, auto, as, from, of, T.
 *)

@@ -49,9 +49,9 @@ A pin is an input, output, or inout of a procedure:
 
 ```ufp
 procedure predict(
-    input  matrix<float> y_pred with y_pred.shape = y_true.shape,
-    input  matrix<float> y_true with y_true.shape = y_pred.shape,
-    output matrix<float> out_pred with out_pred.shape = y_true.shape
+    input  matrix<2>[200,2] y_pred with y_pred.shape = y_true.shape,
+    input  matrix<2>[200,2] y_true with y_true.shape = y_pred.shape,
+    output matrix<2>[200,2] out_pred with out_pred.shape = y_true.shape
 ) { ... }
 ```
 
@@ -97,14 +97,24 @@ bounded fold described in §4.3.
 | `binary` | opaque byte blob | equality only |
 | `list` / `list<T>` | mutable 1-D sequence | heterogeneous unless `T` given |
 | `sheet` | 2-D table with named columns | column-wise typed, row read = `structured` |
-| `matrix<E>[d0, d1, …]` | dense tensor, element type `E` | default `E = float` |
+| `matrix<r>[d0, …, d(r-1)]` | dense tensor, rank `r`, element type from `of` | rank optional; elements default to `float` |
 | `structured { … }` | named product type | dot-access, field-wise ops |
 | `condition` | first-class predicate | `condition(<expr>)`; capture-checked |
 | `auto` | inference placeholder | only on pins / `let` |
 
-`matrix<3>[3,3]` is accepted for backward compatibility as a **rank assertion**
-(`<3>` = expected rank). Canonical form is `matrix<float>[3,3]`. A rank assertion
-that disagrees with the dimension list is a hard error. (See open question Q1.)
+**Matrix syntax (decided, Q1 → D-006):** `<r>` is the **rank**, not the element
+type, and the bracket list gives the extents:
+
+```ufp
+matrix<3>[3,3,3]               // rank 3, 3×3×3, float elements
+matrix<2>[200,2] of double      // rank 2, 200×2, double elements
+matrix<2>[4,4] of int<32>       // 32-bit integer matrix
+matrix[3,3,3]                   // rank omitted; inferred from the dims
+```
+
+When the rank is written it must equal the number of dimensions — a mismatch is a
+hard error. The element type is written with `of` (default `float`). The old
+`matrix<float>[...]` spelling is gone.
 
 ### 3.2 Indexing and field access
 
@@ -130,10 +140,10 @@ a first-class pipe payload, not a reference.
 
 Comparisons are **element-wise and shape-preserving**:
 
-- `matrix == matrix` → `matrix<bool>` of the same shape;
-- `list == list` → `matrix<bool>[len]` (ragged lists are an error);
+- `matrix == matrix` → a `bool` matrix of the same shape;
+- `list == list` → `list<bool>` (ragged lists are an error);
 - `structured == structured` → `structured` with every field replaced by a
-  `bool` (or `matrix<bool>`, …) field;
+  `bool` (or bool-matrix, …) field;
 - ordering (`<`, `<=`, `>`, `>=`) requires every participating field to be
   orderable. Comparing a `string` field with `<` is an error; `==` is fine.
 - scalar results are only produced by explicit reductions (`all`, `any`, `sum`,
@@ -162,11 +172,23 @@ effects. A `condition` is not a `bool`; calling it (`c()`) yields `bool`.
 ### 4.1 Operators
 
 `+ - * / %`, comparisons, `and`/`or`/`not`, bitwise `& | ^ ~ << >>` for integers.
-Matrix arithmetic is element-wise except `@`, which is matrix multiplication.
-(`*` vs `@` is open question Q2; the spec currently follows NumPy.)
 
-No implicit broadcasts except scalar-vs-matrix. Shape mismatches are errors with
-both shapes printed.
+Matrix semantics are **ggml semantics** (decided, Q2 → D-007):
+
+| Source | Meaning | ggml lowering |
+|---|---|---|
+| `a * b` | matrix multiply | `ggml_mul_mat` (with transposes so source stays row-major `a·b`) |
+| `a .* b` | element-wise (Hadamard) | `ggml_mul` |
+| `a / b` | element-wise division | `ggml_div` |
+| `a + b`, `a - b` | element-wise | `ggml_add`, `ggml_sub` |
+| `-a` | negation | `ggml_neg` |
+| `transpose(a)` | swap last two dims | `ggml_transpose` |
+
+`*` is matmul; element-wise multiply is `.*`. There is no `@` — one spelling per
+operation. Contracting dimensions must agree: `[m,k] * [k,n] → [m,n]`; batched
+ranks follow ggml's leading-dim rules, and a mismatch reports both shapes.
+A scalar times a matrix is scalar scaling (fused by the compiler); that is the
+only implicit broadcast.
 
 ### 4.2 Conditionals
 
@@ -207,12 +229,41 @@ Semantics:
   with `@fuel(...)`); exhausting fuel is a runtime error, not silent truncation;
 - statically provable non-termination is a compile error.
 
-### 4.4 Pipe-call sugar
+### 4.4 Pipe chains — Verilog-style ports
 
-`f.(a, b) g(c)` means: call `f(a, b)`, then call `g` with the result inserted as
-its **first unbound argument**, i.e. `g(f(a, b), c)`. This is how Frank writes
-"pass this along the pipe" without naming intermediates. The desugaring is
-purely syntactic; the IR sees explicit edges. (Q7.)
+Think of the chain as Verilog module instantiation: **inputs are fed from the
+left, outputs exit to the right.**
+
+```ufp
+token_tools.(tokens, .) concat(tokens)
+```
+
+desugars to:
+
+```verilog
+// Verilog intuition
+concat u_concat(.in0(token_tools(tokens, .)), .in1(tokens));
+// outputs exit right, into the assignment / next link
+```
+
+Rules (decided, Q7 → D-008):
+
+1. `callee.(a, b)` is an **input port map**: call `callee` binding its input pins
+   by position (or `name = value`). `.` is the current fold accumulator.
+2. A following `next(c, …)` is the next module in the chain. Every output of the
+   previous link is wired, left to right, into `next`'s **leftmost unbound input
+   pins**. Remaining arguments fill subsequent input pins in order.
+3. `next`'s outputs are never named on the left; they exit to the right and become
+   the value of the expression (or feed the next link).
+4. The named form is authoritative and always legal:
+   `concat(in0 = token_tools(tokens, .), in1 = tokens)`.
+
+The sugar is removed during lowering; the IR only sees explicit edges. The
+editor always shows the fully named pin form.
+
+> The one remaining reading risk is whether `g(x)` after a link was meant as
+> *input* binding (current reading) or output naming; see D-008. Named ports make
+> the ambiguity disappear in real code.
 
 ---
 
@@ -284,7 +335,7 @@ Desugaring rules:
 | straight-line `let`/assign | edges + `bind` nodes |
 | `if/elif/else` | `predicate` → `branch` regions → `merge` |
 | `run … until` | `fold` node containing a body subgraph, `fuel`, `predicate` |
-| `f.(a) g(b)` | edge from `f` output into `g`'s first free input |
+| `f.(a) g(b)` | outputs of `f` wired into `g`'s leftmost free inputs (Verilog-style ports) |
 | `structured{…}` | `make_struct` + field extraction nodes |
 | indexing | `index` node with checked bounds |
 | `Portal` | boundary node; target compiled separately |
@@ -431,7 +482,7 @@ Lowered shape:
 
 ```
 [T(0)] encode ──▶ fold(generate) ──▶ tokens
-                     │  body: Qwen_3_4b.forward
+                     │  body: token_tools + concat
                      │  pred: eq(., END) | gt(len(tokens), 1024)
                      └─ fuel: 1024
 ```
@@ -444,18 +495,15 @@ in the IR.
 
 ## 14. Open questions (Frank must rule)
 
-- **Q1** `matrix<3>[3,3]`: is `<3>` a rank, an element type, or legacy noise?
-  Current reading: rank assertion; canonical `matrix<float>[3,3]`.
-- **Q2** does `*` mean matmul or element-wise product for matrices? Current: NumPy
-  rules (`*` element-wise, `@` matmul).
+Resolved: **Q1** → D-006 (matrix rank), **Q2** → D-007 (`*` = matmul, `.*` = Hadamard),
+**Q7** → D-008 (Verilog-style port chains).
+
 - **Q3** `sheet`: dataframe with typed columns? Does it need row mutation?
 - **Q4** "all internal values are integers": are floats bit-cast to ints for
   comparison, or compared numerically? What does `structured{float a}` `<` mean?
 - **Q5** may `string` fields be ordered lexicographically, or equality only?
   Current: equality only.
 - **Q6** exact capture rules for `condition` (by value? by reference?).
-- **Q7** is `f.(a) g(b)` sugar for "insert result as first free argument", or
-  something else? This is the least certain syntax in the spec.
 - **Q8** portal export naming: `main` by default, or require an `export` marker?
 - **Q9** do T zones imply real parallelism (threads), or only legal scheduling?
   Current: legal scheduling + optional barriers in strict codegen.
