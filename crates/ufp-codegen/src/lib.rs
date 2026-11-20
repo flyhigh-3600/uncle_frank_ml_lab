@@ -1,4 +1,4 @@
-//! Native C emitter for the M0 text-terminal slice.
+//! Native C emitters for the text-terminal slice and a narrow ggml matrix subset.
 //!
 //! This intentionally supports only direct input-to-output text pipes. It proves
 //! the end-to-end artifact path; typed IR and ggml partitions replace this small
@@ -75,12 +75,11 @@ pub fn emit_ggml_matmul_c() -> &'static str {
     include_str!("../fixtures/ggml_matmul.c")
 }
 
-/// Lower the currently supported UFP matrix program to native ggml C.
+/// Lower the supported initialized-f32-matrix UFP subset to native ggml C.
 ///
-/// Supported shape: two top-level initialized `matrix<2>[rows, cols] of
-/// float<32>` declarations, and one zero-argument procedure whose body is
-/// exactly `let out = a * b; return out;`. Dimensions use conventional UFP
-/// row/column order and matrix values are row-major.
+/// It supports matrix literals and a single zero-argument procedure containing
+/// ordered `let` bindings over identifiers and `+`, `-`, `.*`, `*`, followed
+/// by a return. Matrix dimensions and literals use conventional row-major order.
 pub fn emit_ggml_matmul_ufp(source: &str) -> Result<String, String> {
     let ast = ufp_syntax::parse_ast(source).map_err(|errors| {
         errors
@@ -131,6 +130,18 @@ struct Matrix {
     values: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Shape {
+    rows: usize,
+    cols: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Value {
+    slot: usize,
+    shape: Shape,
+}
+
 fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
     let declarations: Vec<_> = ast
         .declarations
@@ -142,47 +153,56 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
         .iter()
         .filter(|n| n.kind == SyntaxKind::Procedure)
         .collect();
-    if declarations.len() != 2 || procedures.len() != 1 || ast.declarations.len() != 3 {
+    if declarations.is_empty()
+        || procedures.len() != 1
+        || ast.declarations.len() != declarations.len() + 1
+    {
         return Err(
-            "ggml UFP slice requires exactly two matrix declarations and one procedure".into(),
+            "ggml UFP slice requires one or more matrix declarations and one procedure".into(),
         );
     }
-    let a = parse_matrix(declarations[0])?;
-    let b = parse_matrix(declarations[1])?;
-    if a.name == b.name {
-        return Err("matrix declarations must have distinct names".into());
+    let matrices = declarations
+        .iter()
+        .map(|node| parse_matrix(node))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut names = BTreeMap::new();
+    for (index, matrix) in matrices.iter().enumerate() {
+        if names.insert(matrix.name.as_str(), index).is_some() {
+            return Err(format!("duplicate matrix declaration `{}`", matrix.name));
+        }
     }
-    let (out_name, lhs, rhs) = parse_matmul_procedure(procedures[0])?;
-    if out_name == a.name || out_name == b.name {
-        return Err("matmul result binding must differ from matrix names".into());
+    if ast.declarations.iter().any(|n| {
+        (n.kind == SyntaxKind::Matrix || n.kind == SyntaxKind::Procedure)
+            && n.children
+                .iter()
+                .any(|child| child.kind == SyntaxKind::Annotation)
+    }) {
+        return Err("annotations are not supported by ggml UFP codegen".into());
     }
-    if lhs != a.name || rhs != b.name {
-        return Err(format!(
-            "procedure must multiply declared matrices in order: {} * {}",
-            a.name, b.name
-        ));
-    }
-    if a.cols != b.rows {
-        return Err(format!(
-            "matrix dimension mismatch: {} columns but {} rows",
-            a.cols, b.rows
-        ));
-    }
-    let (a_values, b_values) = (c_values(&a.values), transpose_values(&b));
-    let b_values = c_values(&b_values);
+    let (body, output, label) = parse_procedure(procedures[0], &matrices)?;
     let mut c = String::from(
-        "#include <stdio.h>\n#include <math.h>\n#include <ggml.h>\n#include <ggml-backend.h>\n#include <ggml-alloc.h>\n#include <ggml-cpu.h>\nint main(void) {\n",
+        "#include <stdio.h>\n#include <ggml.h>\n#include <ggml-backend.h>\n#include <ggml-alloc.h>\n#include <ggml-cpu.h>\nint main(void) {\n  struct ggml_init_params p = {.mem_size=64*1024*1024, .mem_buffer=NULL, .no_alloc=true};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n",
     );
+    for (i, matrix) in matrices.iter().enumerate() {
+        let slot = i;
+        c.push_str(&format!(
+            "  const float data_{i}[] = {{{}}};\n  struct ggml_tensor *t_{slot}=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n",
+            c_values(&matrix.values), matrix.cols, matrix.rows
+        ));
+    }
+    c.push_str(&body);
     c.push_str(&format!(
-        "  const float a_data[] = {{{a_values}}};\n  const float b_data[] = {{{b_values}}};\n"
+        "  struct ggml_cgraph *g=ggml_new_graph(ctx); ggml_build_forward_expand(g,t_{});\n  ggml_backend_t be=ggml_backend_cpu_init();\n  if(!be || !ggml_backend_alloc_ctx_tensors(ctx,be)) {{ fprintf(stderr,\"ggml CPU allocation failed\\\\n\"); return 1; }}\n",
+        output.slot
     ));
+    for i in 0..matrices.len() {
+        c.push_str(&format!(
+            "  ggml_backend_tensor_set(t_{i},data_{i},0,sizeof(data_{i}));\n"
+        ));
+    }
     c.push_str(&format!(
-        "  struct ggml_init_params p = {{.mem_size=16*1024*1024, .mem_buffer=NULL, .no_alloc=true}};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n  struct ggml_tensor *a=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n  struct ggml_tensor *b=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n  struct ggml_tensor *out=ggml_mul_mat(ctx,a,b);\n  struct ggml_cgraph *g=ggml_new_graph(ctx); ggml_build_forward_expand(g,out);\n  ggml_backend_t be=ggml_backend_cpu_init();\n  if(!be || !ggml_backend_alloc_ctx_tensors(ctx,be)) {{ fprintf(stderr,\"ggml CPU allocation failed\\\\n\"); return 1; }}\n  ggml_backend_tensor_set(a,a_data,0,sizeof(a_data)); ggml_backend_tensor_set(b,b_data,0,sizeof(b_data));\n  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); return 1; }}\n  float result[{}]; ggml_backend_tensor_get(out,result,0,sizeof(result));\n",
-        a.cols, a.rows, b.rows, b.cols, a.rows * b.cols
-    ));
-    c.push_str(&format!(
-        "  printf(\"{}:\"); for(int r=0;r<{};++r) for(int col=0;col<{};++col) printf(\" %.6g\",result[r+col*{}]); puts(\"\");\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n",
-        out_name, a.rows, b.cols, a.rows
+        "  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); return 1; }}\n  float result[{}]; ggml_backend_tensor_get(t_{},result,0,sizeof(result));\n  printf(\"{}:\"); for(size_t i=0;i<{};++i) printf(\" %.6g\",result[i]); puts(\"\");\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n",
+        output.shape.rows * output.shape.cols, output.slot, label, output.shape.rows * output.shape.cols
     ));
     Ok(c)
 }
@@ -200,9 +220,7 @@ fn parse_matrix(node: &SyntaxNode) -> Result<Matrix, String> {
     else {
         return Err("matrix declarations require rank, dimensions, and element type".into());
     };
-    if rank != "2"
-        || !matches!(element.as_ref(), TypeAst::Sized { name, bits: Some(bits), .. } if name == "float" && bits == "32")
-    {
+    if rank != "2" || !is_f32(element) {
         return Err("only rank-2 `matrix<2>[rows,cols] of float<32>` is supported".into());
     }
     if dimensions.len() != 2 {
@@ -222,17 +240,16 @@ fn parse_matrix(node: &SyntaxNode) -> Result<Matrix, String> {
         .iter()
         .find_map(|child| child.token.as_ref().map(|t| t.text.clone()))
         .ok_or("matrix declaration requires a name")?;
-    let values = match node.expression.as_ref().map(|e| &e.kind) {
-        Some(ExprKind::Matrix(values)) | Some(ExprKind::List(values)) => values
-            .iter()
-            .map(parse_f32_literal)
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => {
-            return Err(format!(
-                "matrix `{name}` requires a flat numeric initializer"
-            ))
+    let initializer = node
+        .expression
+        .as_ref()
+        .ok_or_else(|| format!("matrix `{name}` requires an initializer"))?;
+    let (values, literal_shape) = parse_matrix_values(initializer)?;
+    if let Some((literal_rows, literal_cols)) = literal_shape {
+        if literal_rows != rows || literal_cols != cols {
+            return Err(format!("nested initializer for `{name}` is {literal_rows}x{literal_cols}, declared shape is {rows}x{cols}"));
         }
-    };
+    }
     let count = rows
         .checked_mul(cols)
         .ok_or("matrix element count overflows")?;
@@ -265,7 +282,61 @@ fn parse_f32_literal(expr: &Expr) -> Result<f32, String> {
     }
 }
 
-fn parse_matmul_procedure(node: &SyntaxNode) -> Result<(String, String, String), String> {
+fn parse_matrix_values(expr: &Expr) -> Result<(Vec<f32>, Option<(usize, usize)>), String> {
+    let children = match &expr.kind {
+        ExprKind::Matrix(v) | ExprKind::List(v) => v,
+        _ => {
+            return Err(
+                "matrix initializer must be a flat or nested list of numeric literals".into(),
+            )
+        }
+    };
+    if children.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    if children
+        .iter()
+        .all(|e| matches!(e.kind, ExprKind::List(_) | ExprKind::Matrix(_)))
+    {
+        let mut flat = Vec::new();
+        let mut row_width = None;
+        for row in children {
+            let values = match &row.kind {
+                ExprKind::List(v) | ExprKind::Matrix(v) => v
+                    .iter()
+                    .map(parse_f32_literal)
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => unreachable!(),
+            };
+            if row_width
+                .replace(values.len())
+                .is_some_and(|width| width != values.len())
+            {
+                return Err("nested matrix initializer rows must have equal lengths".into());
+            }
+            flat.extend(values);
+        }
+        return Ok((flat, Some((children.len(), row_width.unwrap_or(0)))));
+    }
+    if children
+        .iter()
+        .any(|e| matches!(e.kind, ExprKind::List(_) | ExprKind::Matrix(_)))
+    {
+        return Err("matrix initializer cannot mix nested rows and scalar values".into());
+    }
+    Ok((
+        children
+            .iter()
+            .map(parse_f32_literal)
+            .collect::<Result<Vec<_>, _>>()?,
+        None,
+    ))
+}
+
+fn parse_procedure(
+    node: &SyntaxNode,
+    matrices: &[Matrix],
+) -> Result<(String, Value, String), String> {
     if node.children.iter().any(|n| n.kind == SyntaxKind::Pin) {
         return Err("ggml UFP slice currently supports only zero-argument procedures".into());
     }
@@ -282,50 +353,150 @@ fn parse_matmul_procedure(node: &SyntaxNode) -> Result<(String, String, String),
         .iter()
         .filter(|n| n.kind == SyntaxKind::Block)
         .collect();
-    if blocks.len() != 1 || blocks[0].children.len() != 2 {
-        return Err("procedure body must contain exactly `let out = a * b; return out;`".into());
+    if blocks.len() != 1 || blocks[0].children.len() < 2 {
+        return Err(
+            "procedure body must contain one or more `let` bindings and a final return".into(),
+        );
     }
-    let let_node = &blocks[0].children[0];
-    let return_node = &blocks[0].children[1];
-    if let_node.kind != SyntaxKind::Let || return_node.kind != SyntaxKind::Return {
-        return Err("procedure body must contain exactly `let out = a * b; return out;`".into());
+    let statements = &blocks[0].children;
+    let return_node = statements.last().unwrap();
+    if return_node.kind != SyntaxKind::Return {
+        return Err("procedure must end with `return expression;`".into());
     }
-    let out = let_node
-        .children
-        .iter()
-        .find_map(|n| n.token.as_ref().map(|t| t.text.clone()))
-        .ok_or("matmul result binding needs a name")?;
-    let ExprKind::Binary { op, left, right } = &let_node
+    let mut env = BTreeMap::new();
+    let mut next_slot = matrices.len();
+    for (i, matrix) in matrices.iter().enumerate() {
+        env.insert(
+            matrix.name.clone(),
+            Value {
+                slot: i,
+                shape: Shape {
+                    rows: matrix.rows,
+                    cols: matrix.cols,
+                },
+            },
+        );
+    }
+    let mut code = String::new();
+    for statement in &statements[..statements.len() - 1] {
+        if statement.kind != SyntaxKind::Let {
+            return Err("only sequential `let` bindings are supported in the procedure".into());
+        }
+        let name = statement
+            .children
+            .iter()
+            .find_map(|n| n.token.as_ref().map(|t| t.text.clone()))
+            .ok_or("let binding needs a name")?;
+        if env.contains_key(&name) {
+            return Err(format!(
+                "duplicate or shadowed binding `{name}` is unsupported"
+            ));
+        }
+        let expr = statement
+            .expression
+            .as_ref()
+            .ok_or("let binding has no expression")?;
+        let value = emit_expr(expr, &env, &mut next_slot, &mut code)?;
+        if let Some(ty) = statement.type_ast.as_ref() {
+            check_declared_shape(ty, value.shape)?;
+        }
+        env.insert(name, value);
+    }
+    let return_expr = return_node
         .expression
         .as_ref()
-        .ok_or("missing matmul expression")?
-        .kind
-    else {
-        return Err("result must be a direct matrix multiplication".into());
+        .ok_or("return requires a matrix expression")?;
+    let label = match &return_expr.kind {
+        ExprKind::Identifier(name) => name.clone(),
+        _ => "out".into(),
     };
-    if op != "*" {
-        return Err("only `*` matrix multiplication is supported".into());
-    }
-    let identifier = |expr: &Expr| match &expr.kind {
-        ExprKind::Identifier(name) => Ok(name.clone()),
-        _ => Err("matmul operands must be declared matrix names".to_string()),
-    };
-    let (lhs, rhs) = (identifier(left)?, identifier(right)?);
-    if !matches!(&return_node.expression.as_ref().map(|e| &e.kind), Some(ExprKind::Identifier(name)) if name == &out)
-    {
-        return Err("procedure must return the matmul result binding".into());
-    }
-    Ok((out, lhs, rhs))
+    let result = emit_expr(return_expr, &env, &mut next_slot, &mut code)?;
+    Ok((code, result, label))
 }
 
-fn transpose_values(matrix: &Matrix) -> Vec<f32> {
-    let mut out = Vec::with_capacity(matrix.values.len());
-    for col in 0..matrix.cols {
-        for row in 0..matrix.rows {
-            out.push(matrix.values[row * matrix.cols + col]);
+fn check_declared_shape(ty: &TypeAst, shape: Shape) -> Result<(), String> {
+    let TypeAst::Matrix {
+        rank: Some(rank),
+        dimensions,
+        element: Some(element),
+        ..
+    } = ty
+    else {
+        return Err("typed let bindings must use `matrix<2>[rows,cols] of float<32>`".into());
+    };
+    if rank != "2" || !is_f32(element) {
+        return Err("typed let bindings support only rank-2 float<32> matrices".into());
+    }
+    if dimensions.len() != 2
+        || dimensions[0].parse::<usize>().ok() != Some(shape.rows)
+        || dimensions[1].parse::<usize>().ok() != Some(shape.cols)
+    {
+        return Err("typed let dimensions do not match inferred expression shape".into());
+    }
+    Ok(())
+}
+
+fn is_f32(ty: &TypeAst) -> bool {
+    matches!(ty, TypeAst::Sized { name, bits: Some(bits), format: None } if name == "float" && bits == "32")
+}
+
+fn emit_expr(
+    expr: &Expr,
+    env: &BTreeMap<String, Value>,
+    next: &mut usize,
+    code: &mut String,
+) -> Result<Value, String> {
+    match &expr.kind {
+        ExprKind::Identifier(name) => env
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("unknown matrix value `{name}`")),
+        ExprKind::Binary { op, left, right } => {
+            let lhs = emit_expr(left, env, next, code)?;
+            let rhs = emit_expr(right, env, next, code)?;
+            let (shape, operation) = match op.as_str() {
+                "+" | "-" | ".*" => {
+                    if lhs.shape != rhs.shape {
+                        return Err(format!("operator `{op}` requires equal matrix shapes"));
+                    }
+                    let function = match op.as_str() {
+                        "+" => "ggml_add",
+                        "-" => "ggml_sub",
+                        _ => "ggml_mul",
+                    };
+                    (
+                        lhs.shape,
+                        format!("{function}(ctx,t_{},t_{})", lhs.slot, rhs.slot),
+                    )
+                }
+                "*" => {
+                    if lhs.shape.cols != rhs.shape.rows {
+                        return Err(format!(
+                            "matmul dimension mismatch: {} columns but {} rows",
+                            lhs.shape.cols, rhs.shape.rows
+                        ));
+                    }
+                    let shape = Shape {
+                        rows: lhs.shape.rows,
+                        cols: rhs.shape.cols,
+                    };
+                    (shape, format!("ggml_cont(ctx,ggml_transpose(ctx,ggml_mul_mat(ctx,t_{},ggml_cont(ctx,ggml_transpose(ctx,t_{})))))", lhs.slot, rhs.slot))
+                }
+                _ => {
+                    return Err(format!(
+                        "operator `{op}` is unsupported by ggml UFP codegen"
+                    ))
+                }
+            };
+            let slot = *next;
+            *next += 1;
+            code.push_str(&format!("  struct ggml_tensor *t_{slot}={operation};\n"));
+            Ok(Value { slot, shape })
+        }
+        _ => {
+            Err("only matrix names and binary matrix operators are supported in expressions".into())
         }
     }
-    out
 }
 
 fn c_values(values: &[f32]) -> String {
@@ -335,6 +506,8 @@ fn c_values(values: &[f32]) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
+
+/* Keep row-major matrix literal helpers local to the codegen boundary. */
 
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -365,16 +538,53 @@ mod tests {
         let source = include_str!("../../../examples/ggml_matmul.ufp");
         let c = emit_ggml_matmul_ufp(source).unwrap();
         assert!(c.contains("ggml_mul_mat"));
-        assert!(c.contains("const float a_data[] = {1.000000000f"));
+        assert!(c.contains("const float data_0[] = {1.000000000f"));
         assert!(c.contains("out:"));
     }
 
     #[test]
     fn rejects_non_supported_matrix_programs() {
         let source = include_str!("../../../examples/ggml_matmul.ufp")
-            .replace("let out = a * b;", "let out = a + b;");
+            .replace("let out = a * b;", "let out = a / b;");
         assert!(emit_ggml_matmul_ufp(&source)
             .unwrap_err()
-            .contains("only `*`"));
+            .contains("operator `/` is unsupported"));
+    }
+
+    #[test]
+    fn lowers_nested_literals_typed_shapes_and_elementwise_ops() {
+        let source = include_str!("../../../examples/ggml_matrix_ops.ufp");
+        let c = emit_ggml_matmul_ufp(source).unwrap();
+        assert!(c.contains("ggml_add"));
+        assert!(c.contains("ggml_mul"));
+        assert!(c.contains("ggml_sub"));
+        assert!(c.contains("1.000000000f,2.000000000f,3.000000000f,4.000000000f"));
+    }
+
+    #[test]
+    fn lowers_three_matrix_matmul_chain() {
+        let source = include_str!("../../../examples/ggml_matmul_chain.ufp");
+        let c = emit_ggml_matmul_ufp(source).unwrap();
+        assert_eq!(c.matches("ggml_mul_mat").count(), 2);
+    }
+
+    #[test]
+    fn rejects_ragged_nested_matrix_rows() {
+        let source = include_str!("../../../examples/ggml_matrix_ops.ufp")
+            .replace("[[1.0, 2.0], [3.0, 4.0]]", "[[1.0, 2.0], [3.0]]");
+        assert!(emit_ggml_matmul_ufp(&source)
+            .unwrap_err()
+            .contains("equal lengths"));
+    }
+
+    #[test]
+    fn rejects_incompatible_elementwise_shapes() {
+        let source = include_str!("../../../examples/ggml_matrix_ops.ufp").replace(
+            "matrix<2>[2,2] of float<32> b",
+            "matrix<2>[1,4] of float<32> b",
+        );
+        assert!(emit_ggml_matmul_ufp(&source)
+            .unwrap_err()
+            .contains("equal matrix shapes"));
     }
 }

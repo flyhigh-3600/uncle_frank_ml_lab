@@ -46,11 +46,14 @@ cargo run -p ufp-cli -- compile examples/ggml_matmul.ufp /tmp/ufp-matmul
 /tmp/ufp-matmul
 ```
 
-It declares two row-major `float<32>` matrices and a zero-argument
-`procedure main()` containing `let out = a * b; return out;`. It prints
-`out: 58 64 139 154`. This is the supported UFP subset: exactly two initialized
-rank-2 matrices, flat numeric literal initializers, compatible dimensions, and
-that one multiplication procedure shape. Other element types, dynamic
-dimensions, pins, multiple operations, calls, portals, models, and general UFP
-are rejected. `UFP_GGML_SOURCE_DIR` and `UFP_GGML_BUILD_DIR` override source/build
+The fixture declares row-major `float<32>` matrices and a zero-argument
+`procedure main()`. `ggml_matrix_ops.ufp` additionally exercises nested and
+flat initializers, a typed local, and `+`, `-`, and `.*`; `ggml_matmul_chain.ufp`
+exercises three matrices and a two-step matmul graph. This remains a deliberately
+small subset: top-level initialized rank-2 f32 matrices with literal dimensions,
+and sequential local `let` bindings of matrix names/binary operations followed
+by a matrix return. Supported operations are shape-checked `+`, `-`, `.*`, and
+`*` (matrix multiplication). Other element types, dynamic dimensions, procedure
+pins, control flow, calls, annotations, portals, models, and general UFP are
+rejected. `UFP_GGML_SOURCE_DIR` and `UFP_GGML_BUILD_DIR` override source/build
 locations. The direct text-pipe `ufp compile` path remains unchanged.

@@ -35,3 +35,21 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 echo "UFP ggml matmul end-to-end: ok"
+
+compile_and_check() {
+  source=$1
+  name=$2
+  expected=$3
+  UFP_GGML_SOURCE_DIR="$root/third_party/ggml" UFP_GGML_BUILD_DIR="$build_dir" \
+    cargo run --manifest-path "$root/Cargo.toml" -q -p ufp-cli -- \
+    compile "$root/examples/$source" "$build_dir/$name"
+  actual=$("$build_dir/$name")
+  if [ "$actual" != "$expected" ]; then
+    echo "$source output mismatch: got '$actual', expected '$expected'" >&2
+    exit 1
+  fi
+  echo "$source: ok"
+}
+
+compile_and_check ggml_matrix_ops.ufp ggml-matrix-ops "out: 1 10 23 40"
+compile_and_check ggml_matmul_chain.ufp ggml-matmul-chain "out: 186 447"
