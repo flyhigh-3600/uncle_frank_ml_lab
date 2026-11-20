@@ -3,6 +3,7 @@ const nums = document.querySelector("#line-numbers");
 let activeFile = "text_io.ufp", selectedNode = "tokenize", speed = 1, timer, runIndex = 0;
 const nodes = ["input", "tokenize", "classify", "output"];
 let connections = [["input","tokenize"],["tokenize","classify"],["classify","output"]];
+let ufpApiAvailable = false;
 const names = {input:"Input", tokenize:"Tokenize", classify:"Classify", output:"Output"};
 function setText(text) { source.value = text; updateLines(); }
 function updateLines() { nums.textContent = Array.from({length: source.value.split("\n").length}, (_,i)=>i+1).join("\n"); }
@@ -51,6 +52,33 @@ async function checkBackend() {
     document.querySelector("#wire-status").textContent="Backend graph validation unavailable";
   }
 }
+async function ufpRequest(action, body) {
+  const response = await fetch(`/api/ufp/${action}`, {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  let data;
+  try { data = await response.json(); } catch { data = {message: await response.text().catch(()=>response.statusText)}; }
+  if (!response.ok) { const error = new Error(data.message || data.error || `HTTP ${response.status}`); error.data=data; throw error; }
+  ufpApiAvailable = true;
+  return data;
+}
+function printDiagnostics(data, label) {
+  const list = data?.diagnostics || data?.errors || [];
+  const items = Array.isArray(list) ? list : [list];
+  const terminal = document.querySelector("#terminal");
+  if (!items.length) { addLog(`<span class="log-time">${label}</span><span class="log-ok">${data?.ok === false ? "Failed" : "No diagnostics"}</span>`); return; }
+  for (const item of items) {
+    const row = document.createElement("div"); row.className="log-line";
+    const severity = String(item.severity || item.level || (data?.ok === false ? "error" : "warning")).toUpperCase();
+    const loc = item.line ? `:${item.line}${item.column ? `:${item.column}` : ""}` : "";
+    row.textContent = `${label} ${severity}${item.code ? ` ${item.code}` : ""}${loc}: ${item.message || item}`;
+    terminal.append(row);
+  }
+}
+function addTextLog(label, text, success=false) {
+  const row=document.createElement("div"); row.className="log-line";
+  const time=document.createElement("span"); time.className="log-time"; time.textContent=label;
+  const message=document.createElement("span"); message.className=success?"log-ok":""; message.textContent=text;
+  row.append(time,message); document.querySelector("#terminal").append(row);
+}
 function selectNode(id) {
   selectedNode=id; document.querySelectorAll(".node").forEach(n=>n.classList.toggle("selected",n.dataset.node===id));
   document.querySelector("#inspect-name").textContent=names[id]; document.querySelector("#inspect-type").textContent=id==="tokenize"?"Text operation":id==="classify"?"Model operation":id==="input"?"Plan input":"Plan output";
@@ -62,7 +90,7 @@ function validate() {
   const wiringOk=connections.length===3;
   const ok=hasPlan&&hasInput&&hasOutput&&open===close&&wiringOk;
   document.querySelector("#wire-status").textContent=ok?"Wiring looks connected":!wiringOk?"Wiring incomplete · connect all ports":"Check plan, input/output and braces";
-  document.querySelector("#validation-label").textContent=ok?"Local checks passed · not compiled":"Local check needs attention";
+  document.querySelector("#validation-label").textContent=ok?"Local checks passed · API check pending":"Local check needs attention";
   document.querySelector("#validation-label").style.color=ok?"#67d6a0":"#e4a078";
   return ok;
 }
@@ -77,8 +105,8 @@ document.querySelectorAll(".file").forEach(b=>b.addEventListener("click",()=>loa
 source.addEventListener("input",save);
 source.addEventListener("keydown",e=>{if(e.key==="Tab"){e.preventDefault();const a=source.selectionStart,b=source.selectionEnd;source.setRangeText("  ",a,b,"end");save()}});
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t===b));document.querySelector("#editor").className=`editor view-${b.dataset.view}`}));
- document.querySelector("#validate").addEventListener("click",()=>{const ok=validate();addLog(`<span class="log-time">check</span><span class="${ok?"log-ok":"log-node"}">${ok?"Local canvas wiring looks connected":"Canvas wiring incomplete"}</span><span>UFP source is not parsed or type-checked</span>`)});
-document.querySelector("#run").addEventListener("click",()=>{if(timer){clearInterval(timer);timer=null;document.querySelector("#session-state").textContent="PAUSED";document.querySelector("#session-state").classList.remove("active");return}runIndex=0;document.querySelectorAll(".node").forEach(n=>n.classList.remove("running"));document.querySelector("#terminal").innerHTML="";document.querySelector("#session-state").textContent="RUNNING";document.querySelector("#session-state").classList.add("active");addLog('<span class="log-time">start</span><span>Starting local mock session</span>');runStep();timer=setInterval(runStep,1000/speed)});
+ document.querySelector("#validate").addEventListener("click",async()=>{validate();const sourceText=source.value;document.querySelector("#terminal").innerHTML="";try{const parsed=await ufpRequest("parse",{source:sourceText});printDiagnostics(parsed,"parse");if(parsed.ok===false)return;const checked=await ufpRequest("check",{source:sourceText});printDiagnostics(checked,"check");const ok=checked.ok!==false&&!(checked.errors||[]).length&&!(checked.diagnostics||[]).some(d=>/error/i.test(d.severity||d.level||""));document.querySelector("#validation-label").textContent=ok?"UFP parsed and checked by backend":"Backend diagnostics reported issues";document.querySelector("#wire-status").textContent=ok?"UFP source accepted by backend":"UFP source needs attention";}catch(error){ufpApiAvailable=false;if(error.data)printDiagnostics(error.data,"backend");const ok=validate();addTextLog("fallback",`${ok?"Local canvas checks passed":"Local canvas checks found issues"} · UFP API unavailable: ${error.message}`,ok)}});
+ document.querySelector("#run").addEventListener("click",async()=>{if(timer){clearInterval(timer);timer=null;document.querySelector("#session-state").textContent="PAUSED";document.querySelector("#session-state").classList.remove("active");return}clearInterval(timer);timer=null;document.querySelectorAll(".node").forEach(n=>n.classList.remove("running"));document.querySelector("#terminal").innerHTML="";document.querySelector("#session-state").textContent="RUNNING";document.querySelector("#session-state").classList.add("active");try{const result=await ufpRequest("run",{source:source.value,inputs:{prompt:document.querySelector("#session-input").value}});printDiagnostics(result,"run");for(const [name,value] of Object.entries(result.outputs||{}))addTextLog("output",`${name}: ${String(value)}`,true);for(const event of result.events||[])addTextLog("event",typeof event==="string"?event:JSON.stringify(event));if(result.output!==undefined)addTextLog("output",String(result.output),true);document.querySelector("#session-state").textContent=result.ok===false?"ERROR":"COMPLETE";document.querySelector("#session-state").classList.remove("active");}catch(error){ufpApiAvailable=false;document.querySelector("#session-state").classList.remove("active");if(error.data){printDiagnostics(error.data,"run");document.querySelector("#session-state").textContent="ERROR";return}document.querySelector("#session-state").textContent="DEMO";addTextLog("fallback",`UFP run API unavailable · ${error.message}`);addTextLog("fallback","Showing local canvas mock; no UFP runtime was called.");runIndex=0;runStep();timer=setInterval(runStep,1000/speed)}});
 document.querySelectorAll(".speed button").forEach(b=>b.addEventListener("click",()=>{speed=Number(b.dataset.speed);document.querySelectorAll(".speed button").forEach(x=>x.classList.toggle("selected",x===b));if(timer){clearInterval(timer);timer=setInterval(runStep,1000/speed)}}));
 document.querySelector("#clear-log").addEventListener("click",()=>document.querySelector("#terminal").innerHTML='<div class="log-muted">Session log cleared.</div>');
 document.querySelectorAll(".node").forEach(n=>{

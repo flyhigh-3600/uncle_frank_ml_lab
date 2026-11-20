@@ -8,11 +8,13 @@ UFP edits are stored in this browser's local storage. `.txt` is inert and
 read-only.
 
 The UI calls `/api/health`, loads `/api/graph/demo`, and posts that backend demo
-graph to `/api/graph/validate`. Those diagnostics apply only to the backend's
-demo ML graph, not to the open UFP source or the illustrative editor canvas.
-The UFP editor does **not** parse, compile, or type-check UFP. “Validate wiring”
-only checks the illustrative local canvas. “Run session” is a timed mock and
-does not call a UFP execution endpoint or run a model.
+graph to `/api/graph/validate`. It also attempts the optional UFP endpoints
+`POST /api/ufp/parse`, `/api/ufp/check`, and `/api/ufp/run` with `{source}`.
+Run adds `inputs: {prompt: <editable session value>}`. Diagnostics, output maps,
+and emitted events are shown in the terminal when returned. If the UFP API is
+not available, local canvas checks and a clearly labeled canvas mock are used;
+the mock is not a UFP execution. The illustrative graph remains independent of
+the open text source and is not rewritten from API parse results.
 
 ## Build and serve
 
@@ -27,7 +29,8 @@ These commands run from `frontend/`. Build writes the static bundle and actual
 examples to `frontend/dist`, served by the backend static fallback. Start the
 Rust server from the repository root with `cargo run -p frank-backend` and open
 <http://127.0.0.1:8787>. `npm test` checks the grammar-shaped fixture assertions
-and verifies source examples exist; no parser/type-checker is implied.
+and verifies source examples exist; frontend-side fallback does not imply a
+parser/type-checker is available.
 
 Draft text and session output remain in this browser. Local requests go to the
 same-origin backend and bundled example files.
