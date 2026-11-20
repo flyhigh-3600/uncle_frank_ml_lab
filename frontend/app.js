@@ -1,12 +1,7 @@
-const examples = {
-  "sentiment.ufp": `plan sentiment {\n  input prompt: text\n\n  tokenize = text_tools.tokenize(\n    prompt,\n    lowercase: true\n  )\n  classify = model.sentiment(\n    tokenize.tokens,\n    labels: [positive, neutral, negative]\n  )\n\n  output result: classify.label\n}`,
-  "layers.ufp": `plan layers {\n  portal text_tools {\n    tokenize = text.tokenize(input)\n    normalize = text.lowercase(tokenize)\n  }\n\n  input prompt: text\n  output result: text_tools.normalize\n}`,
-  "text_io.ufp": `plan text_io {\n  input prompt: text\n  output result: prompt\n}`,
-  "notes.txt": `Local workspace notes\n\nThis is a visual editor prototype. Plans are local draft text; no compiler or model is connected yet.`
-};
+import { samples } from "./samples.js";
 const source = document.querySelector("#source");
 const nums = document.querySelector("#line-numbers");
-let activeFile = "sentiment.ufp", selectedNode = "tokenize", speed = 1, timer, runIndex = 0;
+let activeFile = "text_io.ufp", selectedNode = "tokenize", speed = 1, timer, runIndex = 0;
 const nodes = ["input", "tokenize", "classify", "output"];
 let connections = [["input","tokenize"],["tokenize","classify"],["classify","output"]];
 const names = {input:"Input", tokenize:"Tokenize", classify:"Classify", output:"Output"};
@@ -16,8 +11,16 @@ function save() { if (activeFile.endsWith(".ufp")) localStorage.setItem(`ufp:${a
 function loadFile(file) {
   activeFile=file; document.querySelectorAll(".file").forEach(b=>b.classList.toggle("active",b.dataset.file===file));
   document.querySelector("#crumb-file").textContent=file; document.querySelector("#text-title").textContent=file;
-  setText(localStorage.getItem(`ufp:${file}`) ?? examples[file] ?? examples["sentiment.ufp"]);
-  document.querySelector("#validation-label").textContent=file.endsWith(".ufp")?"Local draft · not compiled":"Plain text · not executable";
+  const inert=file.endsWith(".txt");
+  document.querySelector("#active-file-icon").textContent=inert?"≡":"◇";
+  document.querySelector("#active-file-icon").className=`file-icon ${inert?"amber":"purple"}`;
+  document.querySelector("#file-kind").textContent=inert?"INERT TXT · NOT EXECUTABLE":"UFP SOURCE · PROTOTYPE";
+  source.readOnly=inert;
+  source.classList.toggle("inert-source",inert);
+  document.querySelector("#validate").disabled=inert;
+  document.querySelector("#run").disabled=inert;
+  setText(inert?samples[file]:(localStorage.getItem(`ufp:${file}`) ?? samples[file] ?? samples["text_io.ufp"]));
+  document.querySelector("#validation-label").textContent=inert?"Inert text · not compiled or executable":"Prototype source · no compiler connected";
 }
 function selectNode(id) {
   selectedNode=id; document.querySelectorAll(".node").forEach(n=>n.classList.toggle("selected",n.dataset.node===id));
@@ -26,7 +29,7 @@ function selectNode(id) {
 }
 function validate() {
   const text=source.value, open=(text.match(/\{/g)||[]).length, close=(text.match(/\}/g)||[]).length;
-  const hasPlan=/\bplan\s+\w+/.test(text), hasInput=/\binput\b/.test(text), hasOutput=/\boutput\b/.test(text);
+  const hasPlan=/\b(?:input|output|procedure|portal|node|matrix|binary)\b/.test(text), hasInput=/\binput\b/.test(text), hasOutput=/\boutput\b/.test(text);
   const wiringOk=connections.length===3;
   const ok=hasPlan&&hasInput&&hasOutput&&open===close&&wiringOk;
   document.querySelector("#wire-status").textContent=ok?"Wiring looks connected":!wiringOk?"Wiring incomplete · connect all ports":"Check plan, input/output and braces";
@@ -66,7 +69,7 @@ canvas.addEventListener("drop",e=>{e.preventDefault();const id=e.dataTransfer.ge
 function drawWires(){const svg=document.querySelector("#wires"),rect=canvas.getBoundingClientRect();svg.setAttribute("viewBox",`0 0 ${rect.width} ${rect.height}`);svg.innerHTML="";connections.forEach(([a,b])=>{const x=document.querySelector(`.node[data-node="${a}"]`).getBoundingClientRect(),y=document.querySelector(`.node[data-node="${b}"]`).getBoundingClientRect();let x1=x.right-rect.left,y1=x.top-rect.top+x.height*.65,x2=y.left-rect.left,y2=y.top-rect.top+y.height*.65;if(x2<x1){x1=x.left-rect.left+x.width/2;y1=x.bottom-rect.top;x2=y.left-rect.left+y.width/2;y2=y.top-rect.top}const dx=Math.abs(x2-x1)*.45,path=document.createElementNS("http://www.w3.org/2000/svg","path");path.setAttribute("d",`M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`);path.setAttribute("class","wire");svg.append(path)})}
 document.querySelector("#node-name").addEventListener("input",e=>{if(selectedNode==="tokenize")document.querySelector(".node[data-node='tokenize'] .node-body b").textContent=e.target.value});
 document.querySelector("#lowercase").addEventListener("change",e=>document.querySelector(".node[data-node='tokenize'] .node-body small").textContent=`lowercase · ${e.target.checked}`);
-document.querySelector("#portal-open").addEventListener("click",()=>{loadFile("layers.ufp");document.querySelector(".file[data-file='layers.ufp']").scrollIntoView?.({block:"nearest"});});
-document.querySelector("#new-file").addEventListener("click",()=>{const name=prompt("New local plan filename","untitled.ufp");if(!name)return;const file=name.endsWith(".ufp")||name.endsWith(".txt")?name:`${name}.ufp`;examples[file]="plan untitled {\n  input prompt: text\n  output result: prompt\n}";const nav=document.querySelector(".file-list"),b=document.createElement("button");b.className="file";b.dataset.file=file;b.innerHTML=`<span class="file-icon purple">◇</span>${file}`;b.onclick=()=>loadFile(file);nav.append(b);loadFile(file)});
+document.querySelector("#portal-open").addEventListener("click",()=>{loadFile("layer_000.ufp");document.querySelector(".file[data-file='layer_000.ufp']").scrollIntoView?.({block:"nearest"});});
+document.querySelector("#new-file").addEventListener("click",()=>{const name=prompt("New local UFP filename","untitled.ufp");if(!name)return;const file=name.endsWith(".ufp")?name:`${name}.ufp`;const nav=document.querySelector(".file-list"),b=document.createElement("button");b.className="file";b.dataset.file=file;b.innerHTML=`<span class="file-icon purple">◇</span>${file}<span class="file-type">UFP</span>`;b.onclick=()=>loadFile(file);nav.insertBefore(b,nav.querySelector(".inert-group"));samples[file]=`input prompt = "hello";\noutput reply;\npipe prompt.text -> reply.text;`;loadFile(file)});
 document.querySelectorAll(".node").forEach(n=>n.addEventListener("dragend",drawWires));
 window.addEventListener("resize",drawWires);loadFile(activeFile);requestAnimationFrame(drawWires);
