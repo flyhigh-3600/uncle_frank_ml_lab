@@ -151,6 +151,19 @@ stepping/tracing is opt-in and shares the same event boundaries.
 runtime performance for animation accuracy.
 **Spec:** UFP-SPEC §15.6, §17; SPEC §11
 
+### D-014 — folder workspace, lazy inspection, and layer storage
+**Status:** decided (Frank directive)
+**Decision:** the opened folder is a notebook-like UFP workspace. Each `.ufp`
+is an inspectable graph/source document; models SHOULD be split into layer plans
+composed through compact `Portal` nodes. Portals, procedures, structures and fold
+regions show a summary and expand only on explicit user inspection. Small layer
+weights may use named nested matrix declarations (`matrix[3,4] layer_0 =
+[[...]]`); large weights use validated, lazy project-relative binary-backed
+matrices. Opaque `binary` values support byte-array and local byte-file loading.
+**Rationale:** deep inspection must be accurate without making a large model
+canvas or runtime unusably heavy.
+**Spec:** UFP-SPEC §4.3, §17; SPEC §10.2
+
 ---
 
 ## Open

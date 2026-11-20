@@ -1,0 +1,16 @@
+// layer_000.ufp — a compact, individually inspectable model layer (D-014).
+// A real model uses a binary-backed weight; this tiny source matrix is readable.
+
+matrix[3,4] layer_0 = [
+    [0.30, 0.45, 0.12, 0.91],
+    [0.08, 0.22, 0.77, 0.19],
+    [0.64, 0.51, 0.03, 0.38]
+];
+
+procedure main(
+    input  matrix<2>[1,3] of float<32> x,
+    output matrix<2>[1,4] of float<32> y
+) {
+    y = x * layer_0;
+    return y;
+}

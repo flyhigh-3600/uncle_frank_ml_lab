@@ -44,6 +44,7 @@ as GitHub issues.
 | UF-105 | Golden parser tests + AST snapshots | M | UF-103 | todo |
 | UF-106 | Formatter + source↔IR round-trip tests | M | UF-103 | todo |
 | UF-107 | `.txt` attachments: parse, carry, expose as inert notes | S | UF-102 | todo |
+| UF-109 | Named matrix/binary declarations: nested rows, byte arrays, lazy binary matrix views | M | UF-102 | todo |
 | UF-108 | I/O terminals: `input`/`output` text boxes, trigger/sink lowering | M | UF-102 | doing |
 
 ## E2 — Types & constraints
@@ -102,6 +103,7 @@ as GitHub issues.
 | UF-513 | Run session: coarse active-block highlighting + speed control | M | UF-509, UF-311 | todo |
 | UF-511 | I/O text boxes: editable input, read-only output, source write-back | M | UF-108, UF-502 | todo |
 | UF-512 | Dual graph/text view kept in sync through the shared IR | M | UF-106, UF-308, UF-502 | todo |
+| UF-514 | Folder workspace + lazy inspector: nested tabs, compact portals/layers, bounded matrix slices | L | UF-501, UF-505, UF-508 | todo |
 
 ## E6 — Compiler (C + ggml)
 
@@ -125,6 +127,8 @@ as GitHub issues.
 |---|---|---|---|---|
 | UF-701 | Builtin registry with typed pins and capability classes | M | UF-203 | todo |
 | UF-702 | GGUF import → nested `structured` (metadata + matrix substructures), specialised types | L | UF-701, UF-601 | todo |
+| UF-708 | Local data loaders: binary/byte arrays, JSON, CSV; workspace sandbox and typed results | M | UF-201, UF-701 | todo |
+| UF-709 | GGUF → UFP exporter: layer plans, binary views, portal-root model | L | UF-702, UF-708, UF-305 | todo |
 | UF-703 | `condition` combinators and capture checks | S | UF-204 | todo |
 | UF-704 | Example corpus: one `.ufp` per feature | M | UF-103 | todo |
 | UF-705 | End-to-end demo: load GGUF, run generation fold, inspect tokens | L | UF-604, UF-702, UF-309 | todo |

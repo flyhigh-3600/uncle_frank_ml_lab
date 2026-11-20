@@ -198,7 +198,48 @@ matrix[3,3,3]                          rank inferred from extents
   runtime error unless statically provable, in which case it is a compile error.
 - A matrix is homogeneous; mixed element types require an explicit conversion.
 
-### 4.3 Quantized elements
+### 4.3 Named matrices and binary-backed weights
+
+A named matrix declaration may appear at plan level or inside a procedure:
+
+```ufp
+matrix[3,4] layer_0 = [
+  [0.30, 0.45, 0.12, 0.91],
+  [0.08, 0.22, 0.77, 0.19],
+  [0.64, 0.51, 0.03, 0.38]
+];
+```
+
+`matrix[3,4]` is rank-inferred; `matrix<2>[3,4]` is the equivalent asserted
+form. Nested rows are checked against the written extents and flattened in
+row-major order. The existing brace form remains legal for generated/flat data:
+`matrix<2>[2,2]{1.0, 0.0, 0.0, 1.0}`.
+
+Large layer values SHOULD remain outside source and be referenced as a
+binary-backed matrix:
+
+```ufp
+matrix<2>[4096,4096] of float<16> layer_0 =
+  binary("weights/layer_000.bin", dtype = float<16>, endian = little);
+
+binary vocabulary = load_bytes("tokenizer/vocab.bin");
+binary magic = bytes[0x55, 0x46, 0x50, 0x00];
+```
+
+- `binary(path, dtype = T, endian = little|big)` creates a matrix view over a
+  local byte artifact. The checker verifies byte length, declared extents,
+  element representation and quant block alignment before execution.
+- `load_bytes(path)` reads an opaque local byte blob; `bytes[...]` is an inline
+  byte array (each entry MUST be 0…255). Neither form is silently converted to a
+  matrix.
+- Files are project-relative, canonicalised beneath the open workspace folder,
+  and require the existing filesystem capability. Absolute paths and path escape
+  (`..`) are rejected by the loader.
+- A binary-backed matrix is lazy and does not copy bytes merely because an
+  inspector opens it. The inspector displays metadata and an explicitly selected
+  slice only.
+
+### 4.4 Quantized elements
 
 - `quant<fmt>` is legal only as a matrix element type.
 - `fmt` MUST name a registered ggml block format; unknown names are errors.
@@ -900,6 +941,32 @@ Codes are stable once released. Appendix C lists the initial catalogue.
 
 ---
 
+## 17. Project folders, notebook navigation, and inspection
+
+The folder opened by the user is a **UFP workspace** (D-014), analogous to a
+small Jupyter notebook workspace but graph-first:
+
+- each `.ufp` is a source/graph document in the folder tree; `.txt` remains an
+  inert note; project-relative binary, JSON and CSV artifacts are visible as
+  data assets, never executable source;
+- a `Portal` is initially a compact boundary node. Double-clicking or choosing
+  **Inspect** opens its target `.ufp` in a nested tab/breadcrumb. It expands only
+  in that inspector; the parent canvas remains compact;
+- procedures, structured values, fold regions and model-layer portals use the
+  same lazy expansion rule: show pins, type, shape and summary by default;
+  materialise the interior only when the user explicitly opens it;
+- a model SHOULD be decomposed into one or more layer `.ufp` plans, for example
+  `layers/layer_000.ufp`, each exposing typed pins and optionally a named matrix
+  or binary-backed weight. The model root portals into those plans; it does not
+  paste every layer into one giant canvas;
+- inspectors show matrix metadata by default (shape, dtype, storage, byte count,
+  quant format). Slices/probes are explicit and bounded.
+
+The workspace may offer Run sessions like notebook cells, but the executable
+truth is still the shared IR and source files—not transient browser state.
+
+---
+
 ## 17. Editor contract
 
 - The editor is a view over the IR; it MUST NOT maintain a second semantic model.
@@ -1046,4 +1113,4 @@ Byte-level GGUF parsing is a builtin concern, not a language concern.
 
 | Version | Change |
 |---|---|
-| 1.0.0-draft | Initial normative draft; D-001…D-012 folded in |
+| 1.0.0-draft | Initial normative draft; D-001…D-014 folded in |

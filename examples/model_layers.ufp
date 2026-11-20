@@ -1,0 +1,9 @@
+// model_layers.ufp — a model root stays compact; layers open on demand.
+
+portal layer_000 = "./layers/layer_000.ufp" as main;
+
+input prompt = "inspect this layer tree";
+output reply;
+
+// A later tokenizer/decoder chain connects prompt -> layer_000 -> reply.
+// The portal is intentionally compact until the user chooses Inspect.

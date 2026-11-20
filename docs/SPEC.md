@@ -587,6 +587,34 @@ let block = structured {
 
 ---
 
+## 10.2 Workspace and model-layer organisation
+
+Opening a folder creates a notebook-like UFP workspace: each `.ufp` is a
+separate inspectable source/graph document, `.txt` stays inert, and local binary
+assets are data only. Keep model roots compact by composing layer plans through
+`Portal`; a portal, procedure, structured value, or fold expands only when the
+user asks to inspect it. The default view shows only pins, types, shapes and
+storage metadata.
+
+Small weights may be declared in source:
+
+```ufp
+matrix[3,4] layer_0 = [[0.30, 0.45, 0.12, 0.91], [...], [...]];
+```
+
+Large weights use a lazy project-relative binary matrix view:
+
+```ufp
+matrix<2>[4096,4096] of float<16> layer_0 =
+    binary("weights/layer_000.bin", dtype = float<16>, endian = little);
+```
+
+The loader validates byte length, shape, dtype and quant alignment; the inspector
+never materialises a whole layer unless a user explicitly requests a bounded
+slice (D-014).
+
+---
+
 ## 11. Editor behaviour
 
 The editor is a view over the IR, not a separate model:

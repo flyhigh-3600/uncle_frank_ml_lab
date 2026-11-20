@@ -11,6 +11,8 @@ top_level       = import_decl
                 | portal_decl
                 | text_decl
                 | io_decl
+                | matrix_decl
+                | binary_decl
                 | procedure_decl
                 | node_decl
                 | pipe_decl
@@ -25,6 +27,16 @@ text_decl       = "text" ident "=" STRING ";" ;          (* .txt attachment: ine
 io_decl         = input_decl | output_decl ;
 input_decl      = "input" ident "=" text_lit ";" ;
 output_decl     = "output" ident ";" ;
+
+(* Named layer data. A small layer may be inline; large weights stay binary. *)
+matrix_decl     = matrix_type ident "=" matrix_value ";" ;
+binary_decl     = "binary" ident "=" binary_value ";" ;
+matrix_type     = "matrix" [ "<" INT ">" ] "[" dim_list "]" [ "of" type ] ;
+matrix_value    = matrix_lit | binary_matrix ;
+binary_matrix   = "binary" "(" text_lit "," "dtype" "=" type
+                  [ "," "endian" "=" ident ] ")" ;
+binary_value    = byte_array | "load_bytes" "(" text_lit ")" ;
+byte_array      = "bytes" "[" [ INT { "," INT } ] "]" ;
 
 (* ---------- 2. Procedures and pins ---------- *)
 
@@ -55,6 +67,8 @@ qualified       = ident { "." ident } ;
 
 block           = "{" { statement } "}" ;
 statement       = let_stmt
+                | matrix_stmt
+                | binary_stmt
                 | assign_stmt
                 | if_stmt
                 | return_stmt
@@ -63,6 +77,8 @@ statement       = let_stmt
                 | expr_stmt ;
 
 let_stmt        = "let" ident [ ":" type ] "=" expr ";" ;
+matrix_stmt     = matrix_decl ;
+binary_stmt     = binary_decl ;
 assign_stmt     = lvalue "=" expr ";" ;
 if_stmt         = "if" "(" expr ")" block
                   { "elif" "(" expr ")" block }
@@ -113,8 +129,10 @@ dots            = "." { "." } ;
 struct_lit      = "structured" "{" [ field_init { "," field_init } ] "}" ;
 field_init      = ( type ident | ident ) [ "=" expr ] ;
 list_lit        = "[" [ expr { "," expr } ] "]" ;
-matrix_lit      = "matrix" [ "<" INT ">" ] "[" dim_list "]" [ "of" type ]
-                  "{" [ expr { "," expr } ] "}" ;
+matrix_lit      = matrix_type ( "{" [ expr { "," expr } ] "}"
+                                | matrix_rows ) ;
+matrix_rows     = "[" matrix_row { "," matrix_row } "]" ;
+matrix_row      = "[" [ expr { "," expr } ] "]" ;
 condition_lit   = "condition" "(" expr ")" ;
 
 args            = expr { "," expr } ;

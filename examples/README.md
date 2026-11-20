@@ -14,5 +14,6 @@ decision log settles Q1–Q15.
 | `quantized.ufp` | `float<16>`, `quant<q4_0>`, matmul vs explicit `dequantize` |
 | `gguf.ufp` | nested `structured` model, `matrices[0]`, `..` scope walking (D-011) |
 | `text_io.ufp` | text terminals: `input` trigger, `output` sink, raw text block (D-012) |
+| `model_layers.ufp` + `layers/layer_000.ufp` | folder workspace, compact inspectable portal, named nested matrix (D-014) |
 
 `.txt` files are inert; see `notes.txt`.

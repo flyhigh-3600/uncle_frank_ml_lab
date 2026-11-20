@@ -336,6 +336,12 @@ the project is not done, no matter how green the rest looks.
 - [ ] **UF-512** dual view — graph canvas and text view stay in sync through the IR
   - [ ] switching views does not reorder or lose pipes
   - [ ] comments/positions survive
+- [ ] **UF-514** folder workspace and lazy inspection (D-014)
+  - [ ] open a single folder as a UFP workspace; file tree distinguishes `.ufp`, `.txt`, data assets
+  - [ ] compact portals/procedures/structures/folds expand only by explicit inspect action
+  - [ ] nested tabs + breadcrumbs preserve the compact parent canvas
+  - [ ] model root composes individually inspectable layer `.ufp` plans
+  - [ ] matrix inspector shows metadata first; only explicit bounded slices materialise
 
 ---
 
@@ -381,6 +387,14 @@ the project is not done, no matter how green the rest looks.
 - [ ] **UF-705** end-to-end — GGUF → generation fold → decoded text
 - [ ] **UF-706** text terminal example — input prompt → output reply, with and without GGUF
 - [ ] **UF-707** precision/quantization example — `float<16>`, `bfloat<16>`, `quant<q4_0>`
+- [ ] **UF-708** local data loaders
+  - [ ] `load_bytes`, byte arrays and binary matrix views
+  - [ ] `load_json` → nested `structured`/`list`; `load_csv` → `sheet`
+  - [ ] project-folder sandbox; paths cannot escape the workspace
+- [ ] **UF-709** GGUF → UFP exporter
+  - [ ] one layer `.ufp` or grouped block plan per exported layer
+  - [ ] root plan composes layers through portals
+  - [ ] tensors use binary matrix views by default; inline only when requested
 
 ---
 
@@ -483,6 +497,7 @@ Tick these before calling the ecosystem usable. Each line names the owning task.
 - [x] **`until`** — do-until feedback, pass back only when unmet → D-010
 - [x] **I/O terminals** — `input` trigger, `output` sink, text only → D-012
 - [x] **Run observation** — Run session + coarse highlighting + optional slow mode → D-013
+- [x] **Workspace/layers** — folder workspace, lazy inspection, inline/binary matrix layers → D-014
 - [ ] **Q3** `sheet` — typed columns? row mutation?
 - [ ] **Q4** integer representation of atomics; float comparison semantics
 - [ ] **Q5** `string` ordering: equality only, or lexicographic?
