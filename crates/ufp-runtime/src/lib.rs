@@ -20,6 +20,7 @@ pub struct ResolvedModule {
     pub outputs: Vec<String>,
     pub metadata: BTreeMap<String, String>,
     pub graph: ufp_ir::Graph,
+    pub exports: BTreeMap<String, ufp_ir::Graph>,
     pub portals: Vec<ufp_ir::ModulePortal>,
 }
 
@@ -100,15 +101,42 @@ fn lower_procedure_body(
     source: &str,
     ast: &ufp_syntax::AstPlan,
     portal_links: &[ufp_ir::ModulePortal],
+    procedure_name: &str,
 ) -> Result<Option<ufp_ir::Graph>, RunError> {
     use ufp_syntax::{ExprKind, SyntaxKind};
+    fn contains_fold(expr: &ufp_syntax::Expr) -> bool {
+        match &expr.kind {
+            ExprKind::RunUntil { .. } => true,
+            ExprKind::Unary { value, .. } | ExprKind::Condition(value) => contains_fold(value),
+            ExprKind::Binary { left, right, .. } => contains_fold(left) || contains_fold(right),
+            ExprKind::Field { base, .. } => contains_fold(base),
+            ExprKind::Index { base, indices } => {
+                contains_fold(base) || indices.iter().any(contains_fold)
+            }
+            ExprKind::Call { callee, args } | ExprKind::PortMap { callee, args } => {
+                contains_fold(callee) || args.iter().any(contains_fold)
+            }
+            ExprKind::PortChain { links } | ExprKind::List(links) | ExprKind::Matrix(links) => {
+                links.iter().any(contains_fold)
+            }
+            ExprKind::Structured(fields) => fields
+                .iter()
+                .filter_map(|f| f.value.as_ref())
+                .any(contains_fold),
+            ExprKind::NamedArg { value, .. } => contains_fold(value),
+            ExprKind::Literal(_)
+            | ExprKind::Identifier(_)
+            | ExprKind::Current
+            | ExprKind::Scope { .. } => false,
+        }
+    }
     let Some(proc_node) = ast.declarations.iter().find(|n| {
         n.kind == SyntaxKind::Procedure
             && n.children
                 .iter()
                 .find(|c| c.kind == SyntaxKind::Identifier)
                 .and_then(|c| c.token.as_ref())
-                .is_some_and(|t| t.text == "main")
+                .is_some_and(|t| t.text == procedure_name)
     }) else {
         return Ok(None);
     };
@@ -184,13 +212,36 @@ fn lower_procedure_body(
                 let identifiers = statement.children.iter().filter(|c| c.kind == SyntaxKind::Identifier)
                     .filter_map(|c| c.token.as_ref().map(|t| t.text.clone())).collect::<Vec<_>>();
                 let instance = identifiers.first().ok_or_else(|| RunError("node declaration is missing a name".into()))?;
-                let callee = identifiers.get(1).ok_or_else(|| RunError(format!("node `{instance}` is missing a portal target")))?;
-                let link = portal_links.iter().find(|p| p.node == *callee)
-                    .ok_or_else(|| RunError(format!("node `{instance}` calls unsupported or unknown target `{callee}`")))?;
-                let inputs = link.inputs.iter().zip(&link.input_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:true, variadic:false }).collect();
-                let outputs = link.outputs.iter().zip(&link.output_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:false, variadic:false }).collect();
-                graph.nodes.push(ufp_ir::Node { id:instance.clone(), name:instance.clone(), kind:ufp_ir::NodeKind::Portal,
-                    inputs, outputs, zone:None, span:statement.span, region:None, fold_feedback:false });
+                let raw = source.get(statement.span.start..statement.span.end).unwrap_or_default();
+                let target = raw.split_once(':').map(|(_, rhs)| rhs.trim())
+                    .map(|rhs| rhs.split_once('(').map(|(target, _)| target.trim()).unwrap_or_else(|| rhs.trim_end_matches(';').trim()))
+                    .ok_or_else(|| RunError(format!("node `{instance}` requires a callable target and argument list")))?;
+                if let Some(link) = portal_links.iter().find(|p| p.node == target) {
+                    let inputs = link.inputs.iter().zip(&link.input_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:true, variadic:false }).collect();
+                    let outputs = link.outputs.iter().zip(&link.output_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:false, variadic:false }).collect();
+                    graph.nodes.push(ufp_ir::Node { id:instance.clone(), name:target.into(), kind:ufp_ir::NodeKind::Portal,
+                        inputs, outputs, zone:None, span:statement.span, region:None, fold_feedback:false });
+                } else {
+                    let expression_count = statement.children.iter().filter(|c| c.kind == SyntaxKind::Expression && c.expression.is_some()).count();
+                    let argument_names = identifiers.iter().rev().take(expression_count).cloned().collect::<Vec<_>>();
+                    let mut argument_names = argument_names;
+                    argument_names.reverse();
+                    let inputs = argument_names.iter().map(|name| ufp_ir::Port { name:name.clone(), ty:ufp_types::Type::Auto, required:false, variadic:false }).collect();
+                    let outputs = vec![ufp_ir::Port { name:"out".into(), ty:ufp_types::Type::Auto, required:false, variadic:false }];
+                    for (index, expr) in statement.children.iter().filter(|c| c.kind == SyntaxKind::Expression && c.expression.is_some()).enumerate() {
+                        if let Some(expression) = &expr.expression {
+                            if contains_fold(expression) {
+                                return Err(RunError(format!(
+                                    "unsupported fold/run-until expression in node `{instance}`; fold lowering is not implemented"
+                                )));
+                            }
+                            graph.metadata.insert(format!("node.{instance}.arg.{}", argument_names.get(index).map(String::as_str).unwrap_or("?")), format!("{:?}", expression.kind));
+                        }
+                    }
+                    graph.metadata.insert(format!("node.{instance}.callee"), target.into());
+                    graph.nodes.push(ufp_ir::Node { id:instance.clone(), name:target.into(), kind:ufp_ir::NodeKind::Operation,
+                        inputs, outputs, zone:None, span:statement.span, region:None, fold_feedback:false });
+                }
             }
             SyntaxKind::Pipe => {
                 let expr = statement.children.iter().find_map(|n| n.expression.as_ref())
@@ -210,8 +261,22 @@ fn lower_procedure_body(
                         kind:ufp_ir::EdgeKind::Data, span:statement.span });
                 }
             }
+            SyntaxKind::If => return Err(RunError(format!(
+                "unsupported conditional in procedure `{procedure_name}`; control-flow region lowering is not implemented"
+            ))),
+            SyntaxKind::Let | SyntaxKind::Assign | SyntaxKind::Return | SyntaxKind::ExpressionStatement => {
+                if statement.expression.as_ref().is_some_and(contains_fold) {
+                    return Err(RunError(format!(
+                        "unsupported fold/run-until expression in procedure `{procedure_name}`; fold lowering is not implemented"
+                    )));
+                }
+                return Err(RunError(format!(
+                    "unsupported {:?} expression/statement in procedure `{procedure_name}`; only node declarations and pipes are currently lowerable",
+                    statement.kind
+                )));
+            }
             _ => return Err(RunError(format!(
-                "unsupported {:?} statement in main procedure body; supported forms are node and pipe",
+                "unsupported {:?} statement in procedure `{procedure_name}`; only node declarations and pipes are currently lowerable",
                 statement.kind
             ))),
         }
@@ -333,15 +398,26 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
         }
         let ast = ufp_syntax::parse_ast(&source)
             .map_err(|e| RunError(format!("parse error in `{}`: {}", relative.display(), e[0])))?;
-        let graph = match lower_procedure_body(&source, &ast, &portal_links)? {
-            Some(graph) => graph,
-            None => ufp_ir::lower_plan(&plan).map_err(|e| {
+        let mut export_graphs = BTreeMap::new();
+        for export_name in signatures.keys() {
+            if let Some(graph) = lower_procedure_body(&source, &ast, &portal_links, export_name)? {
+                export_graphs.insert(export_name.clone(), graph);
+            }
+        }
+        let graph = if !export_graphs.is_empty() {
+            export_graphs
+                .get("main")
+                .or_else(|| export_graphs.values().next())
+                .cloned()
+                .unwrap()
+        } else {
+            ufp_ir::lower_plan(&plan).map_err(|e| {
                 RunError(format!(
                     "lower error in `{}`: {}",
                     relative.display(),
                     e[0].message
                 ))
-            })?,
+            })?
         };
         let mut exports = signatures;
         if exports.is_empty() {
@@ -402,6 +478,7 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
             outputs,
             metadata: graph.metadata.clone(),
             graph,
+            exports: export_graphs,
             portals: portal_links,
         });
         done.insert(relative);
@@ -445,6 +522,7 @@ pub fn resolve_module_graph(
             .map(|module| ufp_ir::LinkedModule {
                 id: module.path.display().to_string(),
                 graph: module.graph.clone(),
+                exports: module.exports.clone(),
                 portals: module.portals.clone(),
             })
             .collect(),
@@ -638,7 +716,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("child.ufp"),
-            "procedure main(input string ignored) { } procedure chosen(input string prompt, output string answer, inout int state) { }",
+            "procedure main(input string ignored) { } procedure chosen(input string prompt, output string answer) { pipe prompt.out -> answer.in; }",
         ).unwrap();
         let graph = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
         let root_module = graph
@@ -649,16 +727,17 @@ mod tests {
             .unwrap();
         let link = &root_module.portals[0];
         assert_eq!(link.export, "chosen");
-        assert_eq!(link.inputs, ["prompt", "state"]);
-        assert_eq!(link.outputs, ["answer", "state"]);
-        assert_eq!(
-            link.input_types,
-            [ufp_types::Type::String, ufp_types::Type::Int(None)]
-        );
-        assert_eq!(
-            link.output_types,
-            [ufp_types::Type::String, ufp_types::Type::Int(None)]
-        );
+        assert_eq!(link.inputs, ["prompt"]);
+        assert_eq!(link.outputs, ["answer"]);
+        assert_eq!(link.input_types, [ufp_types::Type::String]);
+        assert_eq!(link.output_types, [ufp_types::Type::String]);
+        let child = graph
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "child.ufp")
+            .unwrap();
+        assert_eq!(child.exports["chosen"].edges.len(), 1);
         assert_eq!(graph.ir.entry, "root.ufp");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -711,6 +790,75 @@ mod tests {
         .unwrap();
         let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
         assert!(error.0.contains("unsupported"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lowers_general_operation_nodes_and_expression_metadata() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-op-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            r#"
+            procedure main(input string prompt, output string answer) {
+                node scale : math.scale(value = prompt, factor = 2);
+                pipe prompt.out -> scale.value;
+                pipe scale.out -> answer.in;
+            }
+        "#,
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
+        let module = graph
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "root.ufp")
+            .unwrap();
+        let scale = module.graph.nodes.iter().find(|n| n.id == "scale").unwrap();
+        assert_eq!(scale.kind, ufp_ir::NodeKind::Operation);
+        assert_eq!(
+            scale
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["value", "factor"]
+        );
+        assert!(module.graph.metadata["node.scale.callee"].contains("math.scale"));
+        assert!(module.graph.metadata.contains_key("node.scale.arg.factor"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conditionals_are_rejected_with_control_flow_diagnostic() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-if-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            "procedure main(input bool flag) { if (flag) { return; } }",
+        )
+        .unwrap();
+        let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
+        assert!(error.0.contains("unsupported conditional"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folds_are_rejected_with_fold_specific_diagnostic() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-fold-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            r#"
+            procedure main(input string prompt, output string result) {
+                result = prompt run(prompt until (condition(true)));
+            }
+        "#,
+        )
+        .unwrap();
+        let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
+        assert!(error.0.contains("fold/run-until"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

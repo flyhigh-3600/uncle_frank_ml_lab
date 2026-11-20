@@ -90,6 +90,9 @@ pub struct ModuleGraph {
 pub struct LinkedModule {
     pub id: String,
     pub graph: Graph,
+    /// Per-procedure lowered graphs; `graph` remains the conventional `main`
+    /// graph (or the first available export when no `main` exists).
+    pub exports: BTreeMap<String, Graph>,
     pub portals: Vec<ModulePortal>,
 }
 
@@ -152,7 +155,7 @@ impl Graph {
                 ));
                 continue;
             };
-            if source.ty != target.ty {
+            if source.ty != target.ty && source.ty != Type::Auto && target.ty != Type::Auto {
                 errors.push(error(
                     "UFP3406",
                     format!(
