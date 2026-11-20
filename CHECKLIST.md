@@ -61,7 +61,7 @@ nothing else is wired yet.
 
 ## E2 — Types & constraints
 
-- [ ] **UF-201** type model — all §3.1 types, interning, canonical printing; `matrix<r>` = rank, `of` = element (D-006)
+- [ ] **UF-201** type model — all §3.1 types, interning, canonical printing; `matrix<r>` = rank, `of` = element (D-006); `float<n>`, `bfloat<16>`, `quant<fmt>` (D-009)
 - [ ] **UF-202** scopes & symbols — shadowing rules documented and tested
 - [ ] **UF-203** expression typing
   - [ ] index arity = rank; bounds provable → static, else runtime check
@@ -82,7 +82,8 @@ nothing else is wired yet.
 - [ ] **UF-301** IR schema — hierarchical, typed ports, zones, source spans, stable ids
 - [ ] **UF-302** straight-line + pipes lowering
 - [ ] **UF-303** conditionals → predicate/branch/merge; branch type unification
-- [ ] **UF-304** `run … until` → fold node
+- [ ] **UF-304** `run … until` → fold node (do-until, D-010)
+  - [ ] body runs ≥ 1; feedback edge gated on "condition unmet"
   - [ ] fuel default 10 000, `@fuel` override
   - [ ] provably unbounded → compile error
 - [ ] **UF-305** portals
@@ -126,7 +127,7 @@ nothing else is wired yet.
 
 - [ ] **UF-601** C runtime header — arena, views, ownership, length-prefixed strings/binary
 - [ ] **UF-602** C codegen — scalars, control flow, structured, string/binary
-- [ ] **UF-603** matrix partitioner + ggml mapping (`@`, add/sub/mul, transpose, softmax, …)
+- [ ] **UF-603** matrix partitioner + ggml mapping (`*` → `mul_mat`, `.*` → `mul`, add/sub/div, transpose, softmax; quantized matmul)
 - [ ] **UF-604** ggml build integration; artifacts deterministic and hashed
 - [ ] **UF-605** fold codegen — bounded loop, inlined/again body, fuel error
 - [ ] **UF-606** portal translation units + linking
@@ -164,6 +165,8 @@ nothing else is wired yet.
 - [x] **Q1** `matrix<3>[3,3,3]` — rank is `<r>`, element type via `of` → D-006
 - [x] **Q2** `*` = matmul, `.*` = Hadamard (ggml semantics) → D-007
 - [x] **Q7** `f.(in) g(in)` = Verilog-style port chain → D-008
+- [x] **Precision** — `float<n>`, `bfloat<16>`, `quant<fmt>` → D-009
+- [x] **`until`** — do-until feedback, pass back only when unmet → D-010
 - [ ] **Q3** `sheet` — typed columns? row mutation?
 - [ ] **Q4** integer representation of atomics; float comparison semantics
 - [ ] **Q5** `string` ordering: equality only, or lexicographic?

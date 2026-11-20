@@ -1,4 +1,4 @@
-// generate.ufp — iteration is a bounded fold, never a loop.
+// generate.ufp — iteration is a do-until feedback loop, never a general loop.
 // `.`  = current accumulator
 // `..` = enclosing procedure's result
 // Q7 is decided (D-008): inputs come from the left, outputs exit right.

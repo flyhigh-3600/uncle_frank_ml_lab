@@ -90,9 +90,12 @@ bounded fold described in §4.3.
 |---|---|---|
 | `bool` | boolean | orderable `false < true` |
 | `int` | machine integer, default width | |
-| `int<32>` | sized integer, `int32_t` | width must be 8/16/32/64 |
-| `float` | 32-bit float | |
-| `double` | 64-bit float | |
+| `int<32>` | sized integer, `int32_t` | width 8/16/32/64 |
+| `float` / `float<32>` | IEEE float, 32-bit default | sized: `float<8>`, `float<16>`, `float<64>` |
+| `float<8, e4m3>` / `float<8, e5m2>` | 8-bit float | variant required at 8 bits |
+| `bfloat<16>` | bfloat16 | LLM-friendly exponent range |
+| `double` | alias for `float<64>` | |
+| `quant<q4_0>` … | ggml block-quantized element type | matrix-only; see below |
 | `string` | UTF-8 text | equality only, not orderable |
 | `binary` | opaque byte blob | equality only |
 | `list` / `list<T>` | mutable 1-D sequence | heterogeneous unless `T` given |
@@ -106,15 +109,36 @@ bounded fold described in §4.3.
 type, and the bracket list gives the extents:
 
 ```ufp
-matrix<3>[3,3,3]               // rank 3, 3×3×3, float elements
-matrix<2>[200,2] of double      // rank 2, 200×2, double elements
-matrix<2>[4,4] of int<32>       // 32-bit integer matrix
-matrix[3,3,3]                   // rank omitted; inferred from the dims
+matrix<3>[3,3,3]                    // rank 3, 3×3×3, float elements
+matrix<2>[200,2] of double           // rank 2, 200×2, float<64>
+matrix<2>[4,4] of int<32>            // 32-bit integer matrix
+matrix<2>[128,64] of float<16>       // half precision
+matrix<2>[4096,4096] of quant<q4_0>  // ggml block-quantized weights
+matrix[3,3,3]                        // rank omitted; inferred from the dims
 ```
 
 When the rank is written it must equal the number of dimensions — a mismatch is a
 hard error. The element type is written with `of` (default `float`). The old
 `matrix<float>[...]` spelling is gone.
+
+**Precision and quantization (decided, D-009).** Frank's LLMs may carry whatever
+precision they like:
+
+- `float<8|16|32|64>`; at 8 bits the variant is explicit (`e4m3`, `e5m2`);
+  `bfloat<16>` is a distinct type, not a `float<16>` alias.
+- `quant<fmt>` is a **matrix-only** element type, using ggml's block formats
+  (`q4_0`, `q4_K`, `q5_K`, `q6_K`, `q8_0`, `iq2_xxs`, …). The format registry is
+  versioned with the compiler; unknown names are errors.
+- A quantized matrix stores blocks + scales. Its extents must satisfy the
+  format's block size (e.g. q4_0 needs the contraction dimension to be a multiple
+  of 32); the checker enforces this.
+- `*` (matmul) is allowed with float activations: `float<32> * quant<q4_0>`
+  lowers to `ggml_mul_mat`. `quant * quant`, element-wise arithmetic, and element
+  indexing are rejected until the value is made explicit:
+  `dequantize(w)`, or `quantize(m, q4_0)`.
+- Accumulation is `float<32>` regardless of storage precision, matching ggml.
+- Matrix literals cannot be quantized; quantization is a runtime/storage step,
+  never a source literal.
 
 ### 3.2 Indexing and field access
 
@@ -209,8 +233,9 @@ constraint solving).
 
 ### 4.3 Iteration without loops
 
-There are no general loops. Iteration is a bounded fold with an explicit
-termination predicate:
+There are no general loops. Iteration is a **conditional feedback loop** — a
+*do-until*: the body procedure is called, and its result is passed back as the
+next input **only while the `until` condition is unmet** (decided, D-010).
 
 ```ufp
 tokens = qwen.(tokens) run(
@@ -221,12 +246,21 @@ tokens = qwen.(tokens) run(
 
 Semantics:
 
-- `.` is the **current accumulator**;
-- `..` is the **enclosing procedure's result** (read-only; assigning it is an error);
-- the expression between `run(` and `until` computes the next accumulator;
-- the predicate is evaluated before each step; a true predicate stops the fold;
+1. `acc ← seed` (the expression before `run`).
+2. Call the body with `acc`; `.` is `acc`. The body's outputs become `next`.
+3. Evaluate `until (condition)` against `next`.
+4. **Condition met** → stop, yield `next`; the feedback edge is *not* taken.
+5. **Condition unmet** → pass `next` back as the next `acc` and call again.
+
+Consequences:
+
+- the body runs **at least once** — this is do-until, not while;
+- the loop-carried back-edge is conditional: tokens are passed back only on the
+  unmet branch, which is exactly what the editor draws as a gated self-edge;
+- `.` is the current accumulator; `..` is the enclosing procedure's result
+  (read-only; assigning it is an error);
 - the compiler inserts a **fuel bound** (default 10 000 iterations, overridable
-  with `@fuel(...)`); exhausting fuel is a runtime error, not silent truncation;
+  with `@fuel(...)`); fuel exhaustion is a runtime error, not silent truncation;
 - statically provable non-termination is a compile error.
 
 ### 4.4 Pipe chains — Verilog-style ports
@@ -334,7 +368,7 @@ Desugaring rules:
 |---|---|
 | straight-line `let`/assign | edges + `bind` nodes |
 | `if/elif/else` | `predicate` → `branch` regions → `merge` |
-| `run … until` | `fold` node containing a body subgraph, `fuel`, `predicate` |
+| `run … until` | `fold` node: body subgraph, predicate, **conditional feedback edge** (do-until), `fuel` |
 | `f.(a) g(b)` | outputs of `f` wired into `g`'s leftmost free inputs (Verilog-style ports) |
 | `structured{…}` | `make_struct` + field extraction nodes |
 | indexing | `index` node with checked bounds |
@@ -391,9 +425,9 @@ Stages:
 3. **ggml mapping** — `@` → `ggml_mul_mat`, `+`/`-` → `ggml_add`/`ggml_sub`,
    element-wise `*` → `ggml_mul`, transpose/reshape/softmax/rope via the matching
    ggml ops. Unsupported ops fall back to C (flagged in the build log).
-4. **Fold codegen** — `run … until` becomes a `for` loop with the fuel counter
-   and the predicate function; the body is inlined or called, never allocated
-   per iteration.
+4. **Fold codegen** — `run … until` becomes a do-until loop: body first, then the
+   predicate; the feedback edge is copied back only on the unmet branch. Fuel is a
+   counter, the body is inlined or called, and nothing is allocated per iteration.
 5. **Portals** — each target `.ufp` compiles to its own translation unit with a
    generated header; the caller links against it. Cache is content-addressed.
 6. **Build** — emit `.c` + runtime header, invoke `clang`/`cc`, link ggml
@@ -488,8 +522,8 @@ Lowered shape:
 ```
 
 Note the deliberate restriction: the accumulator is `tokens`, the body appends,
-and termination is a `condition` over the accumulator — no unbounded loop exists
-in the IR.
+and termination is a `condition` over the accumulator. The back-edge is gated on
+"condition unmet"; no unbounded loop exists in the IR.
 
 ---
 

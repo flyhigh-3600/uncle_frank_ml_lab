@@ -10,6 +10,7 @@ decision log settles Q1–Q15.
 | `predict.ufp` | relational pin constraints, `if/elif/else` |
 | `structured.ufp` | `structured`, dot access, element-wise comparison |
 | `portal_demo.ufp` | `Portal`, top-level nodes, pipes, `@T` zones |
-| `generate.ufp` | bounded fold (`run … until`), `.`, `..`, `condition` |
+| `generate.ufp` | do-until fold (`run … until`), `.`, `..`, `condition` |
+| `quantized.ufp` | `float<16>`, `quant<q4_0>`, matmul vs explicit `dequantize` |
 
 `.txt` files are inert; see `notes.txt`.

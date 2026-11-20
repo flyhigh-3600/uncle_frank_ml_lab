@@ -84,6 +84,28 @@ the right; the whole thing reads like Verilog module instantiation.
 than an input, only the sugar changes; the named form and IR are unaffected.
 **Spec:** §4.4
 
+### D-009 — sized floats and ggml quantization
+**Status:** decided (Frank directive)
+**Decision:** element types include `float<8|16|32|64>` (8-bit needs an
+`e4m3`/`e5m2` variant), `bfloat<16>`, and `quant<fmt>` for ggml block formats.
+`quant<fmt>` is matrix-only, carries blocks + scales, and requires extents that
+match the format's block size. Matmul with float activations is allowed
+(`ggml_mul_mat`, f32 accumulation); element-wise ops and indexing require an
+explicit `dequantize`, and `quantize(m, fmt)` is the inverse. Matrix literals
+cannot be quantized.
+**Rationale:** LLMs arrive in whatever precision their authors chose; the type
+system should say so instead of pretending everything is f32.
+**Spec:** §3.1
+
+### D-010 — `run … until` is a conditional feedback loop
+**Status:** decided (Frank clarification of Q7's `until`)
+**Decision:** the body procedure is called first; its result is passed back as the
+next input only if the `until` condition is **unmet**; if met, the loop stops and
+yields the result. Body runs at least once (do-until), fuel still bounds it.
+**Rationale:** "until calls the procedure again until the condition is fulfilled;
+tokens are passed back only if the conditions are unmet."
+**Spec:** §4.3
+
 ---
 
 ## Open

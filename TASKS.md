@@ -47,7 +47,7 @@ as GitHub issues.
 
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
-| UF-201 | Type model: bool, int\<n\>, float, double, string, binary, sheet, list, matrix, structured, condition | L | UF-103 | todo |
+| UF-201 | Type model: bool, int\<n\>, float\<n\>, bfloat\<16\>, quant\<fmt\>, string, binary, sheet, list, matrix, structured, condition | L | UF-103 | todo |
 | UF-202 | Scopes, symbol tables, pin/param resolution | M | UF-103 | todo |
 | UF-203 | Expression typing: indexing, dot access, struct literals, operators | L | UF-201, UF-202 | todo |
 | UF-204 | Comparison semantics: element-wise bool matrix/struct, orderability errors | M | UF-203 | todo |
@@ -62,7 +62,7 @@ as GitHub issues.
 | UF-301 | IR schema: hierarchical nodes/ports/edges, zones, spans, metadata | M | UF-203 | todo |
 | UF-302 | Lower straight-line procedures and pipes | M | UF-301 | todo |
 | UF-303 | Lower if/elif/else → predicate/branch/merge | L | UF-302 | todo |
-| UF-304 | Lower `run … until` → bounded fold (fuel, predicate, state) | L | UF-302 | todo |
+| UF-304 | Lower `run … until` → bounded do-until fold (gated feedback, fuel) | L | UF-302 | todo |
 | UF-305 | Portal/module resolution, cycle policy, content hashing | L | UF-301 | todo |
 | UF-306 | Lower structured/list/sheet values | M | UF-203, UF-302 | todo |
 | UF-307 | IR validation: types, fan-in, cycles, zone order | M | UF-301 | todo |
@@ -100,7 +100,7 @@ as GitHub issues.
 |---|---|---|---|---|
 | UF-601 | C runtime header: tensor/list/sheet/struct ABI, arena, ownership | L | UF-301 | todo |
 | UF-602 | C codegen: scalars, control flow, structured, string/binary | L | UF-601, UF-303 | todo |
-| UF-603 | Matrix ops → ggml mapping + partitioner | L | UF-601 | todo |
+| UF-603 | Matrix ops → ggml mapping + partitioner (incl. quantized matmul) | L | UF-601 | todo |
 | UF-604 | ggml build integration (vendored by default), deterministic artifacts | M | UF-603 | todo |
 | UF-605 | Fold codegen with fuel + predicate | M | UF-602, UF-304 | todo |
 | UF-606 | Portal → separate translation units + linker | M | UF-602, UF-305 | todo |

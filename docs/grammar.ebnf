@@ -113,7 +113,9 @@ args            = expr { "," expr } ;
 
 type            = "bool"
                 | "int" [ "<" INT ">" ]
-                | "float"
+                | "float" [ "<" INT [ "," ident ] ">" ]
+                | "bfloat" "<" INT ">"
+                | "quant" "<" ident ">"
                 | "double"
                 | "string"
                 | "binary"
@@ -158,5 +160,5 @@ literal         = INT | FLOAT | STRING | "true" | "false" | "null" ;
    Keywords (reserved): procedure, node, pipe, portal, import, text, graph,
    input, output, inout, with, and, or, not, if, elif, else, return, let,
    run, until, structured, condition, matrix, list, sheet, string, binary,
-   bool, int, float, double, true, false, null, auto, as, from, of, T.
+   bool, int, float, bfloat, quant, double, true, false, null, auto, as, from, of, T.
 *)

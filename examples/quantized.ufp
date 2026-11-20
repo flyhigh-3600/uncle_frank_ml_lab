@@ -1,0 +1,22 @@
+// quantized.ufp — precision is part of the type (D-009).
+// A quantized matrix may be multiplied by float activations (ggml_mul_mat),
+// but element-wise work or indexing requires an explicit dequantize.
+
+procedure linear(
+    input  matrix<2>[128,512] of float<16>      x,
+    input  matrix<2>[512,256] of quant<q4_0>    w,
+    output matrix<2>[128,256] of float<32>      out
+) {
+    out = x * w;                       // matmul, f32 accumulation
+    return out;
+}
+
+procedure peek(
+    input matrix<2>[512,256] of quant<q4_0> w,
+    output float first
+) {
+    // let raw = w[0,0];              // error: quantized element not addressable
+    let dense = dequantize(w);        // explicit materialisation
+    first = dense[0,0];
+    return first;
+}
