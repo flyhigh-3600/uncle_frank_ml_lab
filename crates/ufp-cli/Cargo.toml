@@ -12,3 +12,4 @@ path = "src/main.rs"
 ufp-syntax = { path = "../ufp-syntax" }
 ufp-runtime = { path = "../ufp-runtime" }
 ufp-codegen = { path = "../ufp-codegen" }
+ufp-types = { path = "../ufp-types" }

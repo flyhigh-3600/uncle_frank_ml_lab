@@ -681,6 +681,7 @@ dependencies = [
  "ufp-codegen",
  "ufp-runtime",
  "ufp-syntax",
+ "ufp-types",
 ]
 
 [[package]]
