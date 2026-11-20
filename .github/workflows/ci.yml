@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Check UFP crates
+        run: cargo clippy -p ufp-syntax -p ufp-types -p ufp-ir -p ufp-runtime -p ufp-codegen -p ufp-cli --all-targets -- -D warnings
+  ggml-configure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure ggml CPU build
+        run: cmake -S third_party/ggml -B /tmp/ggml-build -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_SERVER=OFF
+      - name: Build ggml CPU
+        run: cmake --build /tmp/ggml-build -j 2

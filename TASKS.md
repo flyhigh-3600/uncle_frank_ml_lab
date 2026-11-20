@@ -27,7 +27,7 @@ as GitHub issues.
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
 | UF-001 | Cargo workspace: `ufp-syntax`, `ufp-types`, `ufp-ir`, `ufp-runtime`, `ufp-codegen`, `ufp-cli`; keep `frank-backend` as demo | M | — | doing |
-| UF-002 | CI baseline: fmt, clippy, tests, web build | S | UF-001 | todo |
+| UF-002 | CI baseline: fmt, clippy, tests, web build | S | UF-001 | doing |
 | UF-003 | Repo hygiene: `.gitignore`, LICENSE decision, CONTRIBUTING, issue/PR templates | S | — | todo |
 | UF-004 | Preserve cursed runtime as reference executor + document its JSON API | S | — | doing |
 | UF-005 | Decision log (`docs/DECISIONS.md`) for Q1–Q15 | S | — | doing |

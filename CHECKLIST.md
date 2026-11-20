@@ -61,7 +61,7 @@ the project is not done, no matter how green the rest looks.
   - [x] D-001…D-012 recorded
   - [x] Q1, Q2, Q7, Q14 and precision resolved
   - [ ] Q3–Q6, Q8–Q13, Q15 resolved or explicitly deferred
-- [ ] **UF-002** CI baseline — fmt + clippy + tests + web build on push
+- [~] **UF-002** CI baseline — fmt + clippy + tests + web build on push
 - [ ] **UF-003** repo hygiene — `.gitignore`, license decision, CONTRIBUTING, issue/PR templates
 - [ ] **UF-101** Lexer — every token, span, comment, literal and annotation
 - [ ] **UF-102** Plan-level parser — every top-level declaration, including text terminals
@@ -81,7 +81,7 @@ the project is not done, no matter how green the rest looks.
 ## E0 — Foundations
 
 - [~] **UF-001** workspace restructure — *see Start here*
-- [ ] **UF-002** CI baseline
+- [~] **UF-002** CI baseline
   - [ ] `cargo fmt --check`
   - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
   - [ ] `cargo test --workspace`
