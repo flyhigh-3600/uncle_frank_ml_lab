@@ -518,7 +518,7 @@ pub enum SyntaxKind {
     Input,
     Output,
     Matrix,
-    Binary,
+    BinaryExpr,
     Procedure,
     Pin,
     Graph,
@@ -540,10 +540,201 @@ pub enum SyntaxKind {
     PortMap,
     RunUntil,
     Scope,
+    Unary,
+    Binary,
+    PortChain,
     Literal,
     Identifier,
     Operator,
     Group,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExprKind {
+    Literal(String),
+    Identifier(String),
+    Current,
+    Scope {
+        depth: usize,
+        name: String,
+        suffix: Vec<Expr>,
+    },
+    Unary {
+        op: String,
+        value: Box<Expr>,
+    },
+    Binary {
+        op: String,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Field {
+        base: Box<Expr>,
+        name: String,
+    },
+    Index {
+        base: Box<Expr>,
+        indices: Vec<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    PortMap {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    PortChain {
+        links: Vec<Expr>,
+    },
+    List(Vec<Expr>),
+    Structured(Vec<(String, Option<Expr>)>),
+    Matrix(Vec<Expr>),
+    Condition(Box<Expr>),
+    RunUntil {
+        value: Box<Expr>,
+        condition: Box<Expr>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeAst {
+    Named(String),
+    Sized {
+        name: String,
+        bits: Option<String>,
+        format: Option<String>,
+    },
+    UnaryContainer {
+        name: String,
+        element: Option<Box<TypeAst>>,
+    },
+    Matrix {
+        rank: Option<String>,
+        dimensions: Vec<String>,
+        element: Option<Box<TypeAst>>,
+    },
+    Structured(Vec<(Box<TypeAst>, String)>),
+    Condition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotationAst {
+    pub name: String,
+    pub args: Vec<AnnotationArg>,
+    pub span: Span,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnnotationArg {
+    Expression(Expr),
+    Name(String),
+    Zone(Vec<String>),
+}
+
+pub fn parse_annotation(source: &str) -> Result<AnnotationAst, Vec<Diagnostic>> {
+    let (tokens, mut errors) = lex(source);
+    let mut p = AstParser {
+        tokens: &tokens,
+        at: 0,
+        errors: Vec::new(),
+    };
+    let start = p.expect("@");
+    let name = p.take().text;
+    let mut args = Vec::new();
+    if p.is("(") {
+        p.take();
+        while !p.eof() && !p.is(")") {
+            if p.tok().kind == TokenKind::Int
+                && p.tokens.get(p.at + 1).is_some_and(|t| t.text == ".")
+            {
+                let mut zone = vec![p.take().text];
+                while p.is(".") {
+                    p.take();
+                    zone.push(p.take().text);
+                }
+                args.push(AnnotationArg::Zone(zone));
+            } else if p.tok().kind == TokenKind::Ident
+                && p.tokens
+                    .get(p.at + 1)
+                    .is_some_and(|t| t.text == "," || t.text == ")")
+            {
+                args.push(AnnotationArg::Name(p.take().text));
+            } else {
+                args.push(AnnotationArg::Expression(p.expr(0)));
+            }
+            if p.is(",") {
+                p.take();
+            } else {
+                break;
+            }
+        }
+        p.expect(")");
+    }
+    if !p.eof() {
+        p.error("UFP2002", "unexpected token after annotation");
+    }
+    let end = p.tokens[p.at.saturating_sub(1)].clone();
+    errors.extend(p.errors);
+    if errors.is_empty() {
+        Ok(AnnotationAst {
+            name,
+            args,
+            span: Span {
+                start: start.span.start,
+                end: end.span.end,
+                line: start.span.line,
+                column: start.span.column,
+            },
+        })
+    } else {
+        Err(errors)
+    }
+}
+
+/// Parse one expression using the UFP precedence table.
+pub fn parse_expression(source: &str) -> Result<Expr, Vec<Diagnostic>> {
+    let (tokens, mut errors) = lex(source);
+    let mut p = AstParser {
+        tokens: &tokens,
+        at: 0,
+        errors: Vec::new(),
+    };
+    let expr = p.expr(0);
+    if !p.eof() {
+        p.error("UFP2002", "unexpected token after expression");
+    }
+    errors.extend(p.errors);
+    if errors.is_empty() {
+        Ok(expr)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Parse a UFP type, including matrix shapes and structured field types.
+pub fn parse_type(source: &str) -> Result<TypeAst, Vec<Diagnostic>> {
+    let (tokens, mut errors) = lex(source);
+    let mut p = AstParser {
+        tokens: &tokens,
+        at: 0,
+        errors: Vec::new(),
+    };
+    let ty = p.type_ast();
+    if !p.eof() {
+        p.error("UFP2002", "unexpected token after type");
+    }
+    errors.extend(p.errors);
+    if errors.is_empty() {
+        Ok(ty)
+    } else {
+        Err(errors)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -609,6 +800,364 @@ impl<'a> AstParser<'a> {
             message: message.into(),
             span: self.tok().span,
         });
+    }
+    fn expr_node(kind: ExprKind, start: &Token, end: &Token) -> Expr {
+        Expr {
+            kind,
+            span: Span {
+                start: start.span.start,
+                end: end.span.end,
+                line: start.span.line,
+                column: start.span.column,
+            },
+        }
+    }
+    fn expr(&mut self, min_prec: u8) -> Expr {
+        let first = self.tok().clone();
+        let mut left = if ["-", "~", "not"].contains(&self.tok().text.as_str()) {
+            let op = self.take().text;
+            let value = self.expr(7);
+            Self::expr_node(
+                ExprKind::Unary {
+                    op,
+                    value: Box::new(value.clone()),
+                },
+                &first,
+                &self.tokens[self.at.saturating_sub(1)],
+            )
+        } else {
+            self.primary_expr()
+        };
+        loop {
+            if self.is(".") && min_prec <= 8 {
+                self.take();
+                if self.is("(") {
+                    let args = self.expr_args();
+                    let end = self.tokens[self.at.saturating_sub(1)].clone();
+                    left = Self::expr_node(
+                        ExprKind::PortMap {
+                            callee: Box::new(left.clone()),
+                            args,
+                        },
+                        &first,
+                        &end,
+                    );
+                } else if self.is(".") {
+                    // A chain of port-qualified values (a.b -> c.d) is retained
+                    // as a port-chain node; `->` also participates below.
+                    break;
+                } else {
+                    let name = self.take();
+                    left = Self::expr_node(
+                        ExprKind::Field {
+                            base: Box::new(left.clone()),
+                            name: name.text.clone(),
+                        },
+                        &first,
+                        &name,
+                    );
+                }
+                continue;
+            }
+            if self.is("[") && min_prec <= 8 {
+                let indices = self.expr_args_close("[", "]");
+                let end = self.tokens[self.at.saturating_sub(1)].clone();
+                left = Self::expr_node(
+                    ExprKind::Index {
+                        base: Box::new(left.clone()),
+                        indices,
+                    },
+                    &first,
+                    &end,
+                );
+                continue;
+            }
+            if self.is("(") && min_prec <= 8 {
+                let args = self.expr_args();
+                let end = self.tokens[self.at.saturating_sub(1)].clone();
+                left = Self::expr_node(
+                    ExprKind::Call {
+                        callee: Box::new(left.clone()),
+                        args,
+                    },
+                    &first,
+                    &end,
+                );
+                continue;
+            }
+            if self.is("run") && min_prec <= 1 {
+                self.take();
+                self.expect("(");
+                let value = self.expr(0);
+                self.expect("until");
+                self.expect("(");
+                let condition = self.expr(0);
+                self.expect(")");
+                let end = self.expect(")");
+                left = Self::expr_node(
+                    ExprKind::RunUntil {
+                        value: Box::new(value),
+                        condition: Box::new(condition),
+                    },
+                    &first,
+                    &end,
+                );
+                continue;
+            }
+            let op = self.tok().text.as_str();
+            let prec = match op {
+                "or" => 1,
+                "and" => 2,
+                "==" | "!=" | "<" | "<=" | ">" | ">=" => 3,
+                "+" | "-" => 4,
+                "*" | ".*" | "/" | "%" => 5,
+                "->" => 0,
+                _ => break,
+            };
+            if prec < min_prec {
+                break;
+            }
+            let op = self.take();
+            let right = self.expr(prec + 1);
+            let end = self.tokens[self.at.saturating_sub(1)].clone();
+            let kind = if op.text == "->" {
+                let links = match left.kind.clone() {
+                    ExprKind::PortChain { links } => links,
+                    _ => vec![left.clone()],
+                };
+                let mut links = links;
+                links.push(right.clone());
+                ExprKind::PortChain { links }
+            } else {
+                ExprKind::Binary {
+                    op: op.text,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            };
+            left = Self::expr_node(kind, &first, &end);
+        }
+        left
+    }
+    fn primary_expr(&mut self) -> Expr {
+        let first = self.tok().clone();
+        if self.is(".") {
+            let mut depth = 0;
+            while self.is(".") {
+                self.take();
+                depth += 1;
+            }
+            if self.tok().kind == TokenKind::Ident || self.tok().kind == TokenKind::Keyword {
+                let name = self.take();
+                return Self::expr_node(
+                    ExprKind::Scope {
+                        depth,
+                        name: name.text.clone(),
+                        suffix: Vec::new(),
+                    },
+                    &first,
+                    &name,
+                );
+            }
+            return Self::expr_node(
+                ExprKind::Current,
+                &first,
+                &self.tokens[self.at.saturating_sub(1)],
+            );
+        }
+        if self.is("(") {
+            self.take();
+            let e = self.expr(0);
+            self.expect(")");
+            return e;
+        }
+        if self.is("[") {
+            let values = self.expr_args_close("[", "]");
+            return Self::expr_node(
+                ExprKind::List(values),
+                &first,
+                &self.tokens[self.at.saturating_sub(1)],
+            );
+        }
+        if self.is("structured") {
+            self.take();
+            self.expect("{");
+            let mut fields = Vec::new();
+            while !self.eof() && !self.is("}") {
+                let name = self.take().text;
+                let value = if self.is("=") {
+                    self.take();
+                    Some(self.expr(0))
+                } else {
+                    None
+                };
+                fields.push((name, value));
+                if self.is(",") {
+                    self.take();
+                } else {
+                    break;
+                }
+            }
+            let end = self.expect("}");
+            return Self::expr_node(ExprKind::Structured(fields), &first, &end);
+        }
+        if self.is("condition") {
+            self.take();
+            self.expect("(");
+            let value = self.expr(0);
+            let end = self.expect(")");
+            return Self::expr_node(ExprKind::Condition(Box::new(value)), &first, &end);
+        }
+        if self.is("matrix") {
+            self.take();
+            // Consume rank and dimensions as type syntax, then parse brace or
+            // nested-row literal as matrix values.
+            if self.is("<") {
+                self.take();
+                while !self.eof() && !self.is(">") {
+                    self.take();
+                }
+                if self.is(">") {
+                    self.take();
+                }
+            }
+            if self.is("[") {
+                self.expr_args_close("[", "]");
+            }
+            if self.is("of") {
+                self.take();
+                self.type_ast();
+            }
+            let values = if self.is("{") {
+                self.expr_args_close("{", "}")
+            } else if self.is("[") {
+                self.expr_args_close("[", "]")
+            } else {
+                vec![]
+            };
+            return Self::expr_node(
+                ExprKind::Matrix(values),
+                &first,
+                &self.tokens[self.at.saturating_sub(1)],
+            );
+        }
+        let t = self.take();
+        if matches!(
+            t.kind,
+            TokenKind::Int | TokenKind::Float | TokenKind::String | TokenKind::TextBlock
+        ) || ["true", "false", "null"].contains(&t.text.as_str())
+        {
+            Self::expr_node(ExprKind::Literal(t.text.clone()), &first, &t)
+        } else {
+            Self::expr_node(ExprKind::Identifier(t.text.clone()), &first, &t)
+        }
+    }
+    fn expr_args(&mut self) -> Vec<Expr> {
+        self.expr_args_close("(", ")")
+    }
+    fn expr_args_close(&mut self, open: &str, close: &str) -> Vec<Expr> {
+        self.expect(open);
+        let mut values = Vec::new();
+        while !self.eof() && !self.is(close) {
+            let before = self.at;
+            values.push(self.expr(0));
+            if self.is(",") {
+                self.take();
+            } else if self.at == before {
+                self.take();
+            } else {
+                break;
+            }
+        }
+        self.expect(close);
+        values
+    }
+    fn type_ast(&mut self) -> TypeAst {
+        let name = self.take().text;
+        match name.as_str() {
+            "int" | "float" | "bfloat" | "quant" => {
+                let mut bits = None;
+                let mut format = None;
+                if self.is("<") {
+                    self.take();
+                    if !self.is(">") {
+                        bits = Some(self.take().text);
+                        if self.is(",") {
+                            self.take();
+                            format = Some(self.take().text);
+                        }
+                    }
+                    self.expect(">");
+                }
+                TypeAst::Sized { name, bits, format }
+            }
+            "list" | "sheet" => {
+                let element = if self.is("<") {
+                    self.take();
+                    let t = self.type_ast();
+                    self.expect(">");
+                    Some(Box::new(t))
+                } else {
+                    None
+                };
+                TypeAst::UnaryContainer { name, element }
+            }
+            "matrix" => {
+                let rank = if self.is("<") {
+                    self.take();
+                    let r = self.take().text;
+                    self.expect(">");
+                    Some(r)
+                } else {
+                    None
+                };
+                self.expect("[");
+                let mut dimensions = Vec::new();
+                while !self.eof() && !self.is("]") {
+                    dimensions.push(self.take().text);
+                    if self.is(",") {
+                        self.take();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect("]");
+                let element = if self.is("of") {
+                    self.take();
+                    Some(Box::new(self.type_ast()))
+                } else {
+                    None
+                };
+                TypeAst::Matrix {
+                    rank,
+                    dimensions,
+                    element,
+                }
+            }
+            "structured" => {
+                self.expect("{");
+                let mut fields = Vec::new();
+                while !self.eof() && !self.is("}") {
+                    let ty = self.type_ast();
+                    let n = self.take().text;
+                    fields.push((Box::new(ty), n));
+                    if self.is(",") {
+                        self.take();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect("}");
+                TypeAst::Structured(fields)
+            }
+            "condition" => {
+                if self.is("(") {
+                    self.expr_args();
+                }
+                TypeAst::Condition
+            }
+            _ => TypeAst::Named(name),
+        }
     }
     fn expect(&mut self, text: &str) -> Token {
         if self.is(text) {
@@ -1208,5 +1757,69 @@ mod tests {
             .any(|n| n.kind == SyntaxKind::Annotation));
         assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Pin));
         assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Block));
+    }
+
+    #[test]
+    fn expression_parser_builds_precedence_and_postfix_trees() {
+        let e = parse_expression("a + b * -c == d and ready").unwrap();
+        let ExprKind::Binary { op, left, .. } = e.kind else {
+            panic!("expected binary tree")
+        };
+        assert_eq!(op, "and");
+        let ExprKind::Binary { op, .. } = left.kind else {
+            panic!("expected comparison")
+        };
+        assert_eq!(op, "==");
+
+        let e = parse_expression("f.(x).out[0](y)").unwrap();
+        let ExprKind::Call { callee, .. } = e.kind else {
+            panic!("expected call")
+        };
+        assert!(matches!(callee.kind, ExprKind::Index { .. }));
+
+        let e = parse_expression("seed run(token_tools.(tokens, .) until(condition(. == limit)))")
+            .unwrap();
+        assert!(matches!(e.kind, ExprKind::RunUntil { .. }));
+        let scoped = parse_expression("..parent.child").unwrap();
+        let ExprKind::Field { base, .. } = scoped.kind else {
+            panic!("expected scoped field")
+        };
+        assert!(matches!(base.kind, ExprKind::Scope { depth: 2, .. }));
+        assert!(matches!(
+            parse_expression("a.out -> b.in").unwrap().kind,
+            ExprKind::PortChain { .. }
+        ));
+        assert!(matches!(
+            parse_expression("[1, 2, 3]").unwrap().kind,
+            ExprKind::List(_)
+        ));
+        assert!(matches!(
+            parse_expression("structured { x = 1, y = true }")
+                .unwrap()
+                .kind,
+            ExprKind::Structured(_)
+        ));
+    }
+
+    #[test]
+    fn parses_type_shapes_and_annotation_zones() {
+        assert!(
+            matches!(parse_type("matrix<2>[128,256] of quant<q4_0>").unwrap(), TypeAst::Matrix { rank: Some(_), dimensions, element: Some(_) } if dimensions.len() == 2)
+        );
+        assert!(
+            matches!(parse_type("structured { int count, list<string> names }").unwrap(), TypeAst::Structured(fields) if fields.len() == 2)
+        );
+        assert!(matches!(
+            parse_type("float<16, ieee>").unwrap(),
+            TypeAst::Sized {
+                bits: Some(_),
+                format: Some(_),
+                ..
+            }
+        ));
+        let annotation = parse_annotation("@T(0.1.2)").unwrap();
+        assert!(
+            matches!(annotation.args.as_slice(), [AnnotationArg::Zone(path)] if path == &["0", "1", "2"])
+        );
     }
 }
