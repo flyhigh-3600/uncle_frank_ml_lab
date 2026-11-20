@@ -506,6 +506,9 @@ pub struct SyntaxNode {
     pub span: Span,
     pub token: Option<Token>,
     pub children: Vec<SyntaxNode>,
+    pub expression: Option<Expr>,
+    pub type_ast: Option<TypeAst>,
+    pub annotation_ast: Option<AnnotationAst>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,7 +521,7 @@ pub enum SyntaxKind {
     Input,
     Output,
     Matrix,
-    BinaryExpr,
+    BinaryDecl,
     Procedure,
     Pin,
     Graph,
@@ -559,6 +562,10 @@ pub struct Expr {
 pub enum ExprKind {
     Literal(String),
     Identifier(String),
+    NamedArg {
+        name: String,
+        value: Box<Expr>,
+    },
     Current,
     Scope {
         depth: usize,
@@ -594,13 +601,20 @@ pub enum ExprKind {
         links: Vec<Expr>,
     },
     List(Vec<Expr>),
-    Structured(Vec<(String, Option<Expr>)>),
+    Structured(Vec<ExprField>),
     Matrix(Vec<Expr>),
     Condition(Box<Expr>),
     RunUntil {
         value: Box<Expr>,
         condition: Box<Expr>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExprField {
+    pub ty: Option<TypeAst>,
+    pub name: String,
+    pub value: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -656,7 +670,12 @@ pub fn parse_annotation(source: &str) -> Result<AnnotationAst, Vec<Diagnostic>> 
                 let mut zone = vec![p.take().text];
                 while p.is(".") {
                     p.take();
-                    zone.push(p.take().text);
+                    if p.tok().kind == TokenKind::Int {
+                        zone.push(p.take().text);
+                    } else {
+                        p.error("UFP2001", "expected integer in zone path");
+                        break;
+                    }
                 }
                 args.push(AnnotationArg::Zone(zone));
             } else if p.tok().kind == TokenKind::Ident
@@ -888,7 +907,28 @@ impl<'a> AstParser<'a> {
             if self.is("run") && min_prec <= 1 {
                 self.take();
                 self.expect("(");
-                let value = self.expr(0);
+                let value_start = self.at;
+                let mut depth = 0i32;
+                while !self.eof() {
+                    if depth == 0 && self.is("until") {
+                        break;
+                    }
+                    match self.tok().text.as_str() {
+                        "(" | "[" | "{" => depth += 1,
+                        ")" | "]" | "}" => depth -= 1,
+                        _ => {}
+                    }
+                    self.take();
+                }
+                let value_end = self.at;
+                let mut value_tokens = self.tokens[value_start..value_end].to_vec();
+                value_tokens.push(self.tokens.last().unwrap().clone());
+                let mut value_parser = AstParser {
+                    tokens: &value_tokens,
+                    at: 0,
+                    errors: Vec::new(),
+                };
+                let value = value_parser.expr(0);
                 self.expect("until");
                 self.expect("(");
                 let condition = self.expr(0);
@@ -941,6 +981,10 @@ impl<'a> AstParser<'a> {
     }
     fn primary_expr(&mut self) -> Expr {
         let first = self.tok().clone();
+        if self.eof() || [")", "]", "}", ",", ";"].contains(&self.tok().text.as_str()) {
+            self.error("UFP2001", "expected expression");
+            return Self::expr_node(ExprKind::Identifier(String::new()), &first, &first);
+        }
         if self.is(".") {
             let mut depth = 0;
             while self.is(".") {
@@ -984,6 +1028,45 @@ impl<'a> AstParser<'a> {
             self.expect("{");
             let mut fields = Vec::new();
             while !self.eof() && !self.is("}") {
+                if self.is("structured")
+                    && self.tokens.get(self.at + 1).is_some_and(|t| t.text == "{")
+                {
+                    let nested = self.primary_expr();
+                    let name = if self.tok().kind == TokenKind::Ident {
+                        self.take().text
+                    } else {
+                        String::new()
+                    };
+                    fields.push(ExprField {
+                        ty: None,
+                        name,
+                        value: Some(nested),
+                    });
+                    if self.is(",") {
+                        self.take();
+                    } else {
+                        break;
+                    }
+                    continue;
+                }
+                let typed = [
+                    "bool",
+                    "int",
+                    "float",
+                    "bfloat",
+                    "quant",
+                    "double",
+                    "string",
+                    "binary",
+                    "list",
+                    "sheet",
+                    "matrix",
+                    "structured",
+                    "condition",
+                    "auto",
+                ]
+                .contains(&self.tok().text.as_str());
+                let ty = if typed { Some(self.type_ast()) } else { None };
                 let name = self.take().text;
                 let value = if self.is("=") {
                     self.take();
@@ -991,7 +1074,7 @@ impl<'a> AstParser<'a> {
                 } else {
                     None
                 };
-                fields.push((name, value));
+                fields.push(ExprField { ty, name, value });
                 if self.is(",") {
                     self.take();
                 } else {
@@ -1060,7 +1143,23 @@ impl<'a> AstParser<'a> {
         let mut values = Vec::new();
         while !self.eof() && !self.is(close) {
             let before = self.at;
-            values.push(self.expr(0));
+            if self.tok().kind == TokenKind::Ident
+                && self.tokens.get(self.at + 1).is_some_and(|t| t.text == "=")
+            {
+                let name = self.take();
+                self.take();
+                let value = self.expr(0);
+                values.push(Self::expr_node(
+                    ExprKind::NamedArg {
+                        name: name.text.clone(),
+                        value: Box::new(value.clone()),
+                    },
+                    &name,
+                    &self.tokens[self.at.saturating_sub(1)],
+                ));
+            } else {
+                values.push(self.expr(0));
+            }
             if self.is(",") {
                 self.take();
             } else if self.at == before {
@@ -1073,6 +1172,10 @@ impl<'a> AstParser<'a> {
         values
     }
     fn type_ast(&mut self) -> TypeAst {
+        if self.eof() {
+            self.error("UFP2001", "expected type");
+            return TypeAst::Named(String::new());
+        }
         let name = self.take().text;
         match name.as_str() {
             "int" | "float" | "bfloat" | "quant" => {
@@ -1174,6 +1277,9 @@ impl<'a> AstParser<'a> {
             span: t.span,
             token: Some(t),
             children: vec![],
+            expression: None,
+            type_ast: None,
+            annotation_ast: None,
         }
     }
     fn node(
@@ -1192,6 +1298,9 @@ impl<'a> AstParser<'a> {
             },
             token: None,
             children,
+            expression: None,
+            type_ast: None,
+            annotation_ast: None,
         }
     }
     fn declaration(&mut self) -> Option<SyntaxNode> {
@@ -1207,7 +1316,7 @@ impl<'a> AstParser<'a> {
             "input" => SyntaxKind::Input,
             "output" => SyntaxKind::Output,
             "matrix" => SyntaxKind::Matrix,
-            "binary" => SyntaxKind::Binary,
+            "binary" => SyntaxKind::BinaryDecl,
             "procedure" => SyntaxKind::Procedure,
             "node" => SyntaxKind::Node,
             "pipe" => SyntaxKind::Pipe,
@@ -1218,6 +1327,8 @@ impl<'a> AstParser<'a> {
             }
         };
         let mut children = annotations;
+        let mut declaration_expr = None;
+        let mut declaration_type = None;
         if kind == SyntaxKind::Procedure {
             children.extend(self.procedure());
         } else if kind == SyntaxKind::Node {
@@ -1226,13 +1337,58 @@ impl<'a> AstParser<'a> {
         } else if kind == SyntaxKind::Pipe {
             self.take();
             children.extend(self.pipe_decl());
+        } else if kind == SyntaxKind::Matrix {
+            declaration_type = Some(self.type_ast());
+            if self.tok().kind == TokenKind::Ident {
+                children.push(self.leaf(SyntaxKind::Identifier));
+            }
+            self.expect("=");
+            let value = self.expr(0);
+            declaration_expr = Some(match value.kind {
+                ExprKind::List(rows) => Self::expr_node(
+                    ExprKind::Matrix(rows),
+                    &start,
+                    &self.tokens[self.at.saturating_sub(1)],
+                ),
+                _ => value,
+            });
+            self.expect(";");
+        } else if kind == SyntaxKind::BinaryDecl {
+            self.take();
+            if self.tok().kind == TokenKind::Ident {
+                children.push(self.leaf(SyntaxKind::Identifier));
+            }
+            self.expect("=");
+            declaration_expr = Some(self.expr(0));
+            self.expect(";");
+        } else if matches!(
+            kind,
+            SyntaxKind::Input | SyntaxKind::Text | SyntaxKind::Portal
+        ) {
+            self.take();
+            if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                children.push(self.leaf(SyntaxKind::Identifier));
+            } else {
+                self.error("UFP2001", "expected declaration name");
+            }
+            self.expect("=");
+            declaration_expr = Some(self.expr(0));
+            if kind == SyntaxKind::Portal && self.is("as") {
+                children.push(self.leaf(SyntaxKind::Operator));
+                children.push(self.leaf(SyntaxKind::Identifier));
+            }
+            self.expect(";");
         } else {
             children.extend(self.until_semicolon());
         }
         let last = self.tokens[self.at.saturating_sub(1)].clone();
-        Some(Self::node(kind, &start, &last, children))
+        let mut result = Self::node(kind, &start, &last, children);
+        result.expression = declaration_expr;
+        result.type_ast = declaration_type;
+        Some(result)
     }
     fn annotation(&mut self) -> SyntaxNode {
+        let first_at = self.at;
         let first = self.take();
         let mut children = vec![];
         if !self.eof() {
@@ -1242,7 +1398,59 @@ impl<'a> AstParser<'a> {
             children.extend(self.group());
         }
         let last = self.tokens[self.at.saturating_sub(1)].clone();
-        Self::node(SyntaxKind::Annotation, &first, &last, children)
+        let mut result = Self::node(SyntaxKind::Annotation, &first, &last, children);
+        let mut ts = self.tokens[first_at..self.at].to_vec();
+        ts.push(self.tokens.last().unwrap().clone());
+        let mut p = AstParser {
+            tokens: &ts,
+            at: 0,
+            errors: Vec::new(),
+        };
+        let start = p.take();
+        let name = p.take().text;
+        let mut args = Vec::new();
+        if p.is("(") {
+            p.take();
+            while !p.eof() && !p.is(")") {
+                if p.tok().kind == TokenKind::Int
+                    && p.tokens.get(p.at + 1).is_some_and(|t| t.text == ".")
+                {
+                    let mut path = vec![p.take().text];
+                    while p.is(".") {
+                        p.take();
+                        if p.tok().kind == TokenKind::Int {
+                            path.push(p.take().text);
+                        } else {
+                            p.error("UFP2001", "expected integer in zone path");
+                            break;
+                        }
+                    }
+                    args.push(AnnotationArg::Zone(path));
+                } else {
+                    args.push(AnnotationArg::Expression(p.expr(0)));
+                }
+                if p.is(",") {
+                    p.take();
+                } else {
+                    break;
+                }
+            }
+            p.expect(")");
+        }
+        if !p.errors.is_empty() {
+            self.errors.extend(p.errors);
+        }
+        result.annotation_ast = Some(AnnotationAst {
+            name,
+            args,
+            span: Span {
+                start: start.span.start,
+                end: last.span.end,
+                line: start.span.line,
+                column: start.span.column,
+            },
+        });
+        result
     }
     fn until_semicolon(&mut self) -> Vec<SyntaxNode> {
         let mut v = Vec::new();
@@ -1313,21 +1521,32 @@ impl<'a> AstParser<'a> {
             while !self.eof() && !self.is(")") {
                 let first = self.tok().clone();
                 let mut pin = Vec::new();
+                if ["input", "output", "inout"].contains(&self.tok().text.as_str()) {
+                    pin.push(self.leaf(SyntaxKind::Operator));
+                }
+                let ty = self.type_ast();
+                let mut pin_node = Self::node(
+                    SyntaxKind::Pin,
+                    &first,
+                    &self.tokens[self.at.saturating_sub(1)],
+                    std::mem::take(&mut pin),
+                );
+                pin_node.type_ast = Some(ty);
+                if self.tok().kind == TokenKind::Ident {
+                    pin_node.children.push(self.leaf(SyntaxKind::Identifier));
+                }
                 while !self.eof() && !self.is(",") && !self.is(")") {
-                    if self.is("(") || self.is("[") || self.is("{") {
-                        pin.extend(self.group());
+                    if self.is("with") {
+                        pin_node.children.push(self.leaf(SyntaxKind::Operator));
+                    } else if self.is("(") || self.is("[") || self.is("{") {
+                        pin_node.children.extend(self.group());
                     } else {
-                        pin.push(self.leaf(
-                            if ["input", "output", "inout"].contains(&self.tok().text.as_str()) {
-                                SyntaxKind::Operator
-                            } else {
-                                SyntaxKind::Type
-                            },
-                        ));
+                        pin_node.children.push(self.leaf(SyntaxKind::Constraint));
                     }
                 }
                 let last = self.tokens[self.at.saturating_sub(1)].clone();
-                out.push(Self::node(SyntaxKind::Pin, &first, &last, pin));
+                pin_node.span.end = last.span.end;
+                out.push(pin_node);
                 if self.is(",") {
                     self.take();
                 } else {
@@ -1366,7 +1585,16 @@ impl<'a> AstParser<'a> {
                 let f = self.take();
                 let mut c = Vec::new();
                 if self.is("(") {
-                    c.extend(self.group());
+                    let (e, span) = self.parenthesized_expr();
+                    let mut n = Self::node(
+                        SyntaxKind::Expression,
+                        &f,
+                        &self.tokens[self.at.saturating_sub(1)],
+                        vec![],
+                    );
+                    n.span = span;
+                    n.expression = Some(e);
+                    c.push(n);
                 } else {
                     self.error("UFP2001", "expected condition");
                 }
@@ -1376,7 +1604,16 @@ impl<'a> AstParser<'a> {
                 while self.is("elif") {
                     c.push(self.leaf(SyntaxKind::Operator));
                     if self.is("(") {
-                        c.extend(self.group());
+                        let (e, span) = self.parenthesized_expr();
+                        let mut n = Self::node(
+                            SyntaxKind::Expression,
+                            &f,
+                            &self.tokens[self.at.saturating_sub(1)],
+                            vec![],
+                        );
+                        n.span = span;
+                        n.expression = Some(e);
+                        c.push(n);
                     }
                     if self.is("{") {
                         c.push(self.block());
@@ -1403,10 +1640,7 @@ impl<'a> AstParser<'a> {
                 let l = self.tokens[self.at.saturating_sub(1)].clone();
                 children.push(Self::node(kind, &f, &l, c));
             } else {
-                let f = self.tok().clone();
-                let c = self.until_semicolon();
-                let l = self.tokens[self.at.saturating_sub(1)].clone();
-                children.push(Self::node(kind, &f, &l, c));
+                children.push(self.simple_statement(kind));
             }
             if self.at == before {
                 self.error("UFP2002", "unable to parse statement");
@@ -1421,11 +1655,124 @@ impl<'a> AstParser<'a> {
         };
         Self::node(SyntaxKind::Block, &first, &last, children)
     }
+    fn parenthesized_expr(&mut self) -> (Expr, Span) {
+        let open = self.expect("(");
+        let expr = self.expr(0);
+        let close = self.expect(")");
+        (
+            expr,
+            Span {
+                start: open.span.start,
+                end: close.span.end,
+                line: open.span.line,
+                column: open.span.column,
+            },
+        )
+    }
+    fn simple_statement(&mut self, kind: SyntaxKind) -> SyntaxNode {
+        let first = self.tok().clone();
+        let mut children = Vec::new();
+        let mut ty = None;
+        let expr: Option<Expr>;
+        if kind == SyntaxKind::Let {
+            self.take();
+            if self.tok().kind == TokenKind::Ident {
+                children.push(self.leaf(SyntaxKind::Identifier));
+            }
+            if self.is(":") {
+                self.take();
+                ty = Some(self.type_ast());
+            }
+            self.expect("=");
+            expr = Some(self.expr(0));
+        } else if kind == SyntaxKind::Return {
+            self.take();
+            expr = if self.is(";") {
+                None
+            } else {
+                Some(self.expr(0))
+            };
+            let semi = self.expect(";");
+            let mut node = Self::node(kind, &first, &semi, children);
+            node.expression = expr;
+            return node;
+        } else {
+            let lhs = self.expr(0);
+            if self.is("=") {
+                self.take();
+                expr = Some(self.expr(0));
+                children.push(SyntaxNode {
+                    kind: SyntaxKind::Expression,
+                    span: lhs.span,
+                    token: None,
+                    children: vec![],
+                    expression: Some(lhs),
+                    type_ast: None,
+                    annotation_ast: None,
+                });
+            } else {
+                expr = Some(lhs);
+            }
+        }
+        let semi = self.expect(";");
+        let mut node = Self::node(kind, &first, &semi, children);
+        node.expression = expr;
+        node.type_ast = ty;
+        node
+    }
     fn node_decl(&mut self) -> Vec<SyntaxNode> {
-        self.until_semicolon()
+        let mut children = Vec::new();
+        if self.tok().kind == TokenKind::Ident {
+            children.push(self.leaf(SyntaxKind::Identifier));
+        }
+        self.expect(":");
+        while !self.eof() && !self.is("(") && !self.is(";") {
+            children.push(self.leaf(SyntaxKind::Identifier));
+            if self.is(".") {
+                children.push(self.leaf(SyntaxKind::Operator));
+            }
+        }
+        if self.is("(") {
+            self.take();
+            while !self.eof() && !self.is(")") {
+                let first = self.tok().clone();
+                if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                    children.push(self.leaf(SyntaxKind::Identifier));
+                }
+                self.expect("=");
+                let value = self.expr(0);
+                let last = self.tokens[self.at.saturating_sub(1)].clone();
+                let mut binding = Self::node(SyntaxKind::Expression, &first, &last, vec![]);
+                binding.expression = Some(value);
+                children.push(binding);
+                if self.is(",") {
+                    self.take();
+                } else {
+                    break;
+                }
+            }
+            self.expect(")");
+        }
+        self.expect(";");
+        children
     }
     fn pipe_decl(&mut self) -> Vec<SyntaxNode> {
-        self.until_semicolon()
+        let start = self.at;
+        if self.tok().kind == TokenKind::Ident
+            && self.tokens.get(self.at + 1).is_some_and(|t| t.text == ":")
+        {
+            self.take();
+            self.take();
+        }
+        let value = self.expr(0);
+        if !matches!(value.kind, ExprKind::PortChain { .. }) {
+            self.error("UFP2001", "expected port chain");
+        }
+        let last = self.expect(";");
+        let first = self.tokens[start].clone();
+        let mut node = Self::node(SyntaxKind::Expression, &first, &last, vec![]);
+        node.expression = Some(value);
+        vec![node]
     }
     fn recover(&mut self) {
         while !self.eof() && !self.is(";") && !self.is("}") {
@@ -1757,6 +2104,88 @@ mod tests {
             .any(|n| n.kind == SyntaxKind::Annotation));
         assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Pin));
         assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Block));
+        assert!(proc
+            .children
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Pin)
+            .unwrap()
+            .type_ast
+            .is_some());
+        assert!(proc.children.iter().any(|n| n.annotation_ast.is_some()));
+        let block = proc
+            .children
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Block)
+            .unwrap();
+        assert!(block.children.iter().any(|n| n.expression.is_some()));
+        let node = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Node)
+            .unwrap();
+        assert!(node.children.iter().any(|n| n.expression.is_some()));
+        let pipe = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Pipe)
+            .unwrap();
+        assert!(pipe.children.iter().any(|n| matches!(
+            n.expression.as_ref().map(|e| &e.kind),
+            Some(ExprKind::PortChain { .. })
+        )));
+    }
+
+    #[test]
+    fn declaration_and_statement_nodes_carry_recursive_semantics() {
+        let ast = parse_ast("matrix<2>[2,2] eye = [[1,0],[0,1]]; binary weights = bytes[0,255]; procedure f(){ let x: list<float> = [1.0, 2.0]; return x; }").unwrap();
+        let matrix = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Matrix)
+            .unwrap();
+        assert!(matches!(matrix.type_ast, Some(TypeAst::Matrix { .. })));
+        let ExprKind::Matrix(rows) = &matrix.expression.as_ref().unwrap().kind else {
+            panic!("expected matrix AST")
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].kind, ExprKind::List(_)));
+        let binary = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::BinaryDecl)
+            .unwrap();
+        assert!(binary.expression.is_some());
+        let procedure = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Procedure)
+            .unwrap();
+        let block = procedure
+            .children
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Block)
+            .unwrap();
+        let let_stmt = block
+            .children
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Let)
+            .unwrap();
+        assert!(matches!(
+            let_stmt.type_ast,
+            Some(TypeAst::UnaryContainer { .. })
+        ));
+        assert!(let_stmt.expression.is_some());
+    }
+
+    #[test]
+    fn malformed_semantic_ast_inputs_report_recoverable_diagnostics() {
+        assert!(!parse_expression("a +").unwrap_err().is_empty());
+        assert!(!parse_type("matrix<2>[2,").unwrap_err().is_empty());
+        assert!(!parse_annotation("@T(0.x)").unwrap_err().is_empty());
+        let errors =
+            parse_ast("procedure bad(input matrix<2>[2,] x) { let x = ; } output ok;").unwrap_err();
+        assert!(!errors.is_empty());
+        assert!(errors.iter().all(|d| d.span.start <= d.span.end));
     }
 
     #[test]
