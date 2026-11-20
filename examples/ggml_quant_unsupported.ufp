@@ -1,0 +1,7 @@
+// Deliberately rejected until binary-backed quantized weight loading is wired.
+matrix<2>[2,2] of quant<q4_0> weights = [1, 2, 3, 4];
+
+procedure main() {
+    let out = weights;
+    return out;
+}

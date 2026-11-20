@@ -66,6 +66,11 @@ and sequential local `let` bindings of matrix names/binary operations followed
 by a matrix return. Supported operations are shape-checked `+`, `-`, `.*`, and
 `*` (matrix multiplication). Other element types, dynamic dimensions, inout or
 multiple output pins, control flow, calls, annotations, portals, models, and
-general UFP are rejected. `UFP_GGML_SOURCE_DIR` and `UFP_GGML_BUILD_DIR`
-override source/build locations. The direct text-pipe `ufp compile` path remains
+general UFP are rejected. Quantized matrix declarations and pins receive a
+specific diagnostic: quantized generation is blocked until runtime loading
+provides packed weight bytes plus a verified mapping from declared formats (for
+example `q4_0`) to ggml types/storage. The codegen does not reinterpret numeric
+literals as packed quantized weights. `ggml_quant_unsupported.ufp` is a
+diagnostic fixture. `UFP_GGML_SOURCE_DIR` and `UFP_GGML_BUILD_DIR` override
+source/build locations. The direct text-pipe `ufp compile` path remains
 unchanged.
