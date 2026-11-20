@@ -1,14 +1,18 @@
 # Frank's Plan Editor (local prototype)
 
-A dependency-light, static UI prototype for browsing bundled repository example
-snippets, editing UFP text, inspecting a graph, and stepping through a mock
-terminal session. Samples follow the current grammar examples but are browser
-copies, not dynamically loaded repository files. `.txt` is presented as inert,
-read-only prose and cannot be run from the UI.
+A dependency-light local editor slice for browsing the repository's actual
+`examples/` files, editing UFP text, inspecting a demo canvas, and stepping
+through a mock terminal session. The build copies `../examples/` to
+`frontend/dist/examples/`; the browser fetches examples from that local bundle.
+UFP edits are stored in this browser's local storage. `.txt` is inert and
+read-only.
 
-It does **not** parse/compile `.ufp`, execute a model, or connect to backend
-graph APIs. “Validate wiring” checks only a few local text-shape conditions;
-it is not a type checker or graph validator.
+The UI calls `/api/health`, loads `/api/graph/demo`, and posts that backend demo
+graph to `/api/graph/validate`. Those diagnostics apply only to the backend's
+demo ML graph, not to the open UFP source or the illustrative editor canvas.
+The UFP editor does **not** parse, compile, or type-check UFP. “Validate wiring”
+only checks the illustrative local canvas. “Run session” is a timed mock and
+does not call a UFP execution endpoint or run a model.
 
 ## Build and serve
 
@@ -16,14 +20,14 @@ Requires Node.js/npm; no package installation is needed.
 
 ```sh
 npm run build
+npm test
 ```
 
-This writes the static bundle to `frontend/dist`, the directory used by the
-backend static fallback. Start the Rust server from `backend/` with `cargo run`
-and open <http://127.0.0.1:8787>. You can also serve `dist/` with any static
-file server. To edit the source directly without building, open `index.html`.
-The build runs Node assertions for the text terminal, portal, layer, and inert
-TXT sample forms before copying the static files.
+These commands run from `frontend/`. Build writes the static bundle and actual
+examples to `frontend/dist`, served by the backend static fallback. Start the
+Rust server from the repository root with `cargo run -p frank-backend` and open
+<http://127.0.0.1:8787>. `npm test` checks the grammar-shaped fixture assertions
+and verifies source examples exist; no parser/type-checker is implied.
 
-Draft text is stored in browser local storage. Demo files and session output
-remain in this browser; no requests are made by the UI.
+Draft text and session output remain in this browser. Local requests go to the
+same-origin backend and bundled example files.
