@@ -76,6 +76,37 @@ fn compile(path: &str, source: &str, mut args: impl Iterator<Item = String>) -> 
         eprintln!("ufp: compile accepts one output path");
         return ExitCode::from(2);
     }
+    // Matrix programs use the deliberately narrow typed-AST ggml path. Keep
+    // the existing shallow text-plan parser/emitter as the default path.
+    if let Ok(ast) = ufp_syntax::parse_ast(source) {
+        if ast
+            .declarations
+            .iter()
+            .any(|n| n.kind == ufp_syntax::SyntaxKind::Matrix)
+        {
+            let ggml_source = env::var_os("UFP_GGML_SOURCE_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("third_party/ggml"));
+            let ggml_build = env::var_os("UFP_GGML_BUILD_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(".cache/ggml-build"));
+            return match ufp_codegen::compile_ggml_matmul_ufp(
+                source,
+                std::path::Path::new(&output),
+                &ggml_source,
+                &ggml_build,
+            ) {
+                Ok(()) => {
+                    println!("compiled {output}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{path}: compile: {error}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+    }
     let plan = match ufp_syntax::parse_plan(source) {
         Ok(plan) => plan,
         Err(diagnostics) => return print_errors(path, &diagnostics),
