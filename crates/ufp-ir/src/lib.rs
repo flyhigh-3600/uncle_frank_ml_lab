@@ -77,6 +77,33 @@ pub struct Graph {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// A project module linked to other modules by portal declarations. `target`
+/// is a normalized project-relative module path; links refer to module ids so
+/// recursive source modules remain representable without recursive Rust values.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ModuleGraph {
+    pub entry: String,
+    pub modules: Vec<LinkedModule>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedModule {
+    pub id: String,
+    pub graph: Graph,
+    pub portals: Vec<ModulePortal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModulePortal {
+    pub node: String,
+    pub target: String,
+    pub export: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub input_types: Vec<String>,
+    pub output_types: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationError {
     pub code: &'static str,
