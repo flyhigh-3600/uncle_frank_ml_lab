@@ -30,7 +30,12 @@ pub struct ResolvedModuleGraph {
     pub ir: ufp_ir::ModuleGraph,
 }
 
-type PinSignature = (Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+type PinSignature = (
+    Vec<String>,
+    Vec<String>,
+    Vec<ufp_types::Type>,
+    Vec<ufp_types::Type>,
+);
 
 fn procedure_signatures(
     source: &str,
@@ -74,8 +79,9 @@ fn procedure_signatures(
             let ty = pin
                 .type_ast
                 .as_ref()
-                .map(|ty| format!("{ty:?}"))
-                .unwrap_or_default();
+                .ok_or_else(|| RunError(format!("pin `{name}` has no type")))?;
+            let ty = ufp_types::type_from_ast(ty)
+                .map_err(|e| RunError(format!("invalid type for pin `{name}`: {e}")))?;
             if direction == "input" || direction == "inout" {
                 inputs.push(name.clone());
                 input_types.push(ty.clone());
@@ -88,6 +94,142 @@ fn procedure_signatures(
         signatures.insert(name, (inputs, outputs, input_types, output_types));
     }
     Ok(signatures)
+}
+
+fn lower_procedure_body(
+    source: &str,
+    ast: &ufp_syntax::AstPlan,
+    portal_links: &[ufp_ir::ModulePortal],
+) -> Result<Option<ufp_ir::Graph>, RunError> {
+    use ufp_syntax::{ExprKind, SyntaxKind};
+    let Some(proc_node) = ast.declarations.iter().find(|n| {
+        n.kind == SyntaxKind::Procedure
+            && n.children
+                .iter()
+                .find(|c| c.kind == SyntaxKind::Identifier)
+                .and_then(|c| c.token.as_ref())
+                .is_some_and(|t| t.text == "main")
+    }) else {
+        return Ok(None);
+    };
+    let body = proc_node
+        .children
+        .iter()
+        .find(|n| n.kind == SyntaxKind::Block)
+        .ok_or_else(|| RunError("main procedure has no block body".into()))?;
+    let mut graph = ufp_ir::Graph::default();
+    for pin in proc_node
+        .children
+        .iter()
+        .filter(|n| n.kind == SyntaxKind::Pin)
+    {
+        let direction = pin
+            .children
+            .iter()
+            .find_map(|c| c.token.as_ref())
+            .map(|t| t.text.as_str())
+            .unwrap_or("input");
+        let name = pin
+            .children
+            .iter()
+            .find(|c| c.kind == SyntaxKind::Identifier)
+            .and_then(|c| c.token.as_ref())
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        let ty = ufp_types::type_from_ast(
+            pin.type_ast
+                .as_ref()
+                .ok_or_else(|| RunError(format!("pin `{name}` has no type")))?,
+        )
+        .map_err(|e| RunError(format!("invalid pin `{name}` type: {e}")))?;
+        if direction == "inout" {
+            return Err(RunError(format!(
+                "unsupported procedure pin direction `inout` for `{name}`"
+            )));
+        }
+        let port = ufp_ir::Port {
+            name: if direction == "input" { "out" } else { "in" }.into(),
+            ty,
+            required: direction == "output",
+            variadic: false,
+        };
+        graph.nodes.push(ufp_ir::Node {
+            id: name.clone(),
+            name,
+            kind: if direction == "input" {
+                ufp_ir::NodeKind::Input
+            } else {
+                ufp_ir::NodeKind::Output
+            },
+            inputs: if direction == "output" {
+                vec![port.clone()]
+            } else {
+                vec![]
+            },
+            outputs: if direction == "input" {
+                vec![port]
+            } else {
+                vec![]
+            },
+            zone: None,
+            span: pin.span,
+            region: None,
+            fold_feedback: false,
+        });
+    }
+    let mut pipes = Vec::new();
+    for statement in &body.children {
+        match statement.kind {
+            SyntaxKind::Node => {
+                let identifiers = statement.children.iter().filter(|c| c.kind == SyntaxKind::Identifier)
+                    .filter_map(|c| c.token.as_ref().map(|t| t.text.clone())).collect::<Vec<_>>();
+                let instance = identifiers.first().ok_or_else(|| RunError("node declaration is missing a name".into()))?;
+                let callee = identifiers.get(1).ok_or_else(|| RunError(format!("node `{instance}` is missing a portal target")))?;
+                let link = portal_links.iter().find(|p| p.node == *callee)
+                    .ok_or_else(|| RunError(format!("node `{instance}` calls unsupported or unknown target `{callee}`")))?;
+                let inputs = link.inputs.iter().zip(&link.input_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:true, variadic:false }).collect();
+                let outputs = link.outputs.iter().zip(&link.output_types).map(|(n,t)| ufp_ir::Port { name:n.clone(), ty:t.clone(), required:false, variadic:false }).collect();
+                graph.nodes.push(ufp_ir::Node { id:instance.clone(), name:instance.clone(), kind:ufp_ir::NodeKind::Portal,
+                    inputs, outputs, zone:None, span:statement.span, region:None, fold_feedback:false });
+            }
+            SyntaxKind::Pipe => {
+                let expr = statement.children.iter().find_map(|n| n.expression.as_ref())
+                    .ok_or_else(|| RunError("pipe has no parsed port chain".into()))?;
+                let ExprKind::PortChain { links } = &expr.kind else { return Err(RunError("only simple port-chain pipes are supported in main".into())); };
+                if links.len() < 2 { return Err(RunError("pipe must connect at least two endpoints".into())); }
+                for pair in links.windows(2) {
+                    fn endpoint(e: &ufp_syntax::Expr) -> Option<(String,String)> {
+                        if let ExprKind::Field { base, name } = &e.kind {
+                            if let ExprKind::Identifier(node) = &base.kind { return Some((node.clone(), name.clone())); }
+                        }
+                        None
+                    }
+                    let (from, from_port) = endpoint(&pair[0]).ok_or_else(|| RunError("pipe endpoint must be `node.port`".into()))?;
+                    let (to, to_port) = endpoint(&pair[1]).ok_or_else(|| RunError("pipe endpoint must be `node.port`".into()))?;
+                    pipes.push(ufp_ir::Edge { id:format!("{from}:{from_port}->{to}:{to_port}"), from, from_port, to, to_port,
+                        kind:ufp_ir::EdgeKind::Data, span:statement.span });
+                }
+            }
+            _ => return Err(RunError(format!(
+                "unsupported {:?} statement in main procedure body; supported forms are node and pipe",
+                statement.kind
+            ))),
+        }
+    }
+    graph.edges = pipes;
+    let errors = graph.validate();
+    if !errors.is_empty() {
+        return Err(RunError(format!(
+            "procedure graph validation: {}",
+            errors
+                .iter()
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    let _ = source;
+    Ok(Some(graph))
 }
 
 /// Resolve portal files relative to the project root, recursively checking
@@ -189,9 +331,18 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
                 });
             }
         }
-        // Module/procedure bodies are not yet lowered by the shallow plan API;
-        // retain all supported terminal/portal graph nodes where validation permits.
-        let graph = ufp_ir::lower_plan(&plan).unwrap_or_default();
+        let ast = ufp_syntax::parse_ast(&source)
+            .map_err(|e| RunError(format!("parse error in `{}`: {}", relative.display(), e[0])))?;
+        let graph = match lower_procedure_body(&source, &ast, &portal_links)? {
+            Some(graph) => graph,
+            None => ufp_ir::lower_plan(&plan).map_err(|e| {
+                RunError(format!(
+                    "lower error in `{}`: {}",
+                    relative.display(),
+                    e[0].message
+                ))
+            })?,
+        };
         let mut exports = signatures;
         if exports.is_empty() {
             exports.insert(
@@ -199,13 +350,39 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
                 (
                     inputs.clone(),
                     outputs.clone(),
-                    vec![String::new(); inputs.len()],
-                    vec![String::new(); outputs.len()],
+                    vec![ufp_types::Type::String; inputs.len()],
+                    vec![ufp_types::Type::String; outputs.len()],
                 ),
             );
         }
         selected.insert(relative.clone(), exports);
         let mut graph = graph;
+        for link in &portal_links {
+            if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == link.node) {
+                node.inputs = link
+                    .inputs
+                    .iter()
+                    .zip(&link.input_types)
+                    .map(|(name, ty)| ufp_ir::Port {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        required: true,
+                        variadic: false,
+                    })
+                    .collect();
+                node.outputs = link
+                    .outputs
+                    .iter()
+                    .zip(&link.output_types)
+                    .map(|(name, ty)| ufp_ir::Port {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        required: false,
+                        variadic: false,
+                    })
+                    .collect();
+            }
+        }
         graph
             .metadata
             .insert("module.path".into(), relative.display().to_string());
@@ -476,19 +653,64 @@ mod tests {
         assert_eq!(link.outputs, ["answer", "state"]);
         assert_eq!(
             link.input_types,
-            [
-                "Named(\"string\")",
-                "Sized { name: \"int\", bits: None, format: None }"
-            ]
+            [ufp_types::Type::String, ufp_types::Type::Int(None)]
         );
         assert_eq!(
             link.output_types,
-            [
-                "Named(\"string\")",
-                "Sized { name: \"int\", bits: None, format: None }"
-            ]
+            [ufp_types::Type::String, ufp_types::Type::Int(None)]
         );
         assert_eq!(graph.ir.entry, "root.ufp");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lowers_procedure_nodes_and_pipes_with_typed_portal_boundary() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-lower-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            r#"
+            portal child = "child.ufp";
+            procedure main(input string prompt, output string answer) {
+                node call : child(prompt = prompt);
+                pipe prompt.out -> call.prompt;
+                pipe call.answer -> answer.in;
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("child.ufp"),
+            "procedure main(input string prompt, output string answer) { pipe prompt.out -> answer.in; }",
+        )
+        .unwrap();
+        let result = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
+        let module = result
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "root.ufp")
+            .unwrap();
+        assert_eq!(module.graph.edges.len(), 2);
+        let call = module.graph.nodes.iter().find(|n| n.id == "call").unwrap();
+        assert_eq!(call.kind, ufp_ir::NodeKind::Portal);
+        assert_eq!(call.inputs[0].ty, ufp_types::Type::String);
+        assert_eq!(call.outputs[0].ty, ufp_types::Type::String);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsupported_procedure_body_instead_of_empty_graph() {
+        let root =
+            std::env::temp_dir().join(format!("ufp-portal-unsupported-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            "procedure main(input string prompt) { let x = prompt; }",
+        )
+        .unwrap();
+        let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
+        assert!(error.0.contains("unsupported"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
