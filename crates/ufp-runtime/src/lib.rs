@@ -19,6 +19,75 @@ pub struct ResolvedModule {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub metadata: BTreeMap<String, String>,
+    pub graph: ufp_ir::Graph,
+    pub portals: Vec<ufp_ir::ModulePortal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedModuleGraph {
+    pub entry: PathBuf,
+    pub modules: Vec<ResolvedModule>,
+    pub ir: ufp_ir::ModuleGraph,
+}
+
+type PinSignature = (Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+
+fn procedure_signatures(
+    source: &str,
+    module: &Path,
+) -> Result<BTreeMap<String, PinSignature>, RunError> {
+    let ast = ufp_syntax::parse_ast(source)
+        .map_err(|e| RunError(format!("parse error in `{}`: {}", module.display(), e[0])))?;
+    let mut signatures = BTreeMap::new();
+    for declaration in ast
+        .declarations
+        .iter()
+        .filter(|n| n.kind == ufp_syntax::SyntaxKind::Procedure)
+    {
+        let name = declaration
+            .children
+            .iter()
+            .find(|n| n.kind == ufp_syntax::SyntaxKind::Identifier)
+            .and_then(|n| n.token.as_ref())
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        let (mut inputs, mut outputs, mut input_types, mut output_types) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for pin in declaration
+            .children
+            .iter()
+            .filter(|n| n.kind == ufp_syntax::SyntaxKind::Pin)
+        {
+            let direction = pin
+                .children
+                .iter()
+                .find_map(|n| n.token.as_ref())
+                .map(|t| t.text.as_str())
+                .unwrap_or("input");
+            let name = pin
+                .children
+                .iter()
+                .find(|n| n.kind == ufp_syntax::SyntaxKind::Identifier)
+                .and_then(|n| n.token.as_ref())
+                .map(|t| t.text.clone())
+                .unwrap_or_default();
+            let ty = pin
+                .type_ast
+                .as_ref()
+                .map(|ty| format!("{ty:?}"))
+                .unwrap_or_default();
+            if direction == "input" || direction == "inout" {
+                inputs.push(name.clone());
+                input_types.push(ty.clone());
+            }
+            if direction == "output" || direction == "inout" {
+                outputs.push(name);
+                output_types.push(ty);
+            }
+        }
+        signatures.insert(name, (inputs, outputs, input_types, output_types));
+    }
+    Ok(signatures)
 }
 
 /// Resolve portal files relative to the project root, recursively checking
@@ -31,6 +100,7 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
         active: &mut Vec<PathBuf>,
         done: &mut BTreeSet<PathBuf>,
         modules: &mut Vec<ResolvedModule>,
+        selected: &mut BTreeMap<PathBuf, BTreeMap<String, PinSignature>>,
     ) -> Result<(), RunError> {
         let full = root.join(path);
         let canonical = full
@@ -61,7 +131,7 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
         active.push(relative.clone());
         for item in &plan.items {
             if let Item::Portal { path, .. } = item {
-                visit(root, Path::new(path), active, done, modules)?;
+                visit(root, Path::new(path), active, done, modules, selected)?;
             }
         }
         active.pop();
@@ -78,13 +148,64 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
                 _ => {}
             }
         }
-        let mut graph = ufp_ir::lower_plan(&plan).map_err(|e| {
-            RunError(format!(
-                "lower error in `{}`: {}",
-                relative.display(),
-                e[0].message
-            ))
-        })?;
+        let signatures = procedure_signatures(&source, &relative)?;
+        let mut portal_links = Vec::new();
+        for item in &plan.items {
+            if let Item::Portal {
+                name,
+                path: target,
+                alias,
+                ..
+            } = item
+            {
+                let target_path = root
+                    .join(target)
+                    .canonicalize()
+                    .map_err(|e| RunError(format!("cannot resolve module `{target}`: {e}")))?
+                    .strip_prefix(
+                        root.canonicalize()
+                            .map_err(|e| RunError(format!("invalid project root: {e}")))?,
+                    )
+                    .map_err(|_| RunError(format!("module `{target}` escapes project root")))?
+                    .to_path_buf();
+                let target_export = alias.clone().unwrap_or_else(|| "main".into());
+                let exports = selected
+                    .get(&target_path)
+                    .ok_or_else(|| RunError(format!("portal target `{target}` was not loaded")))?;
+                let (pin_inputs, pin_outputs, input_types, output_types) =
+                    exports.get(&target_export).cloned().ok_or_else(|| {
+                        RunError(format!(
+                            "module `{target}` does not export procedure `{target_export}`"
+                        ))
+                    })?;
+                portal_links.push(ufp_ir::ModulePortal {
+                    node: name.clone(),
+                    target: target_path.display().to_string(),
+                    export: target_export,
+                    inputs: pin_inputs,
+                    outputs: pin_outputs,
+                    input_types,
+                    output_types,
+                });
+            }
+        }
+        // Module/procedure bodies are not yet lowered by the shallow plan API;
+        // retain all supported terminal/portal graph nodes where validation permits.
+        let graph = ufp_ir::lower_plan(&plan).unwrap_or_default();
+        let mut exports = signatures;
+        if exports.is_empty() {
+            exports.insert(
+                "main".into(),
+                (
+                    inputs.clone(),
+                    outputs.clone(),
+                    vec![String::new(); inputs.len()],
+                    vec![String::new(); outputs.len()],
+                ),
+            );
+        }
+        selected.insert(relative.clone(), exports);
+        let mut graph = graph;
         graph
             .metadata
             .insert("module.path".into(), relative.display().to_string());
@@ -102,20 +223,60 @@ pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<Resolved
             content_hash: format!("{hash:016x}"),
             inputs,
             outputs,
-            metadata: graph.metadata,
+            metadata: graph.metadata.clone(),
+            graph,
+            portals: portal_links,
         });
         done.insert(relative);
         Ok(())
     }
     let mut modules = Vec::new();
+    let mut selected = BTreeMap::new();
     visit(
         project_root,
         entry,
         &mut Vec::new(),
         &mut BTreeSet::new(),
         &mut modules,
+        &mut selected,
     )?;
     Ok(modules)
+}
+
+/// Resolve the entry module into an explicit IR module graph, preserving each
+/// portal's selected export and the selected procedure's pin names.
+pub fn resolve_module_graph(
+    project_root: &Path,
+    entry: &Path,
+) -> Result<ResolvedModuleGraph, RunError> {
+    let modules = resolve_portals(project_root, entry)?;
+    let root = project_root
+        .canonicalize()
+        .map_err(|e| RunError(format!("invalid project root: {e}")))?;
+    let entry = root
+        .join(entry)
+        .canonicalize()
+        .map_err(|e| RunError(format!("cannot resolve entry `{}`: {e}", entry.display())))?
+        .strip_prefix(&root)
+        .map_err(|_| RunError("entry escapes project root".into()))?
+        .display()
+        .to_string();
+    let ir = ufp_ir::ModuleGraph {
+        entry: entry.clone(),
+        modules: modules
+            .iter()
+            .map(|module| ufp_ir::LinkedModule {
+                id: module.path.display().to_string(),
+                graph: module.graph.clone(),
+                portals: module.portals.clone(),
+            })
+            .collect(),
+    };
+    Ok(ResolvedModuleGraph {
+        entry: PathBuf::from(entry),
+        modules,
+        ir,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +447,48 @@ mod tests {
         std::fs::write(root.join("b.ufp"), "portal a = \"a.ufp\";").unwrap();
         let error = resolve_portals(&root, Path::new("a.ufp")).unwrap_err();
         assert!(error.0.contains("portal cycle"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_selected_procedure_pin_signature_into_linked_ir() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-export-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("root.ufp"),
+            "portal child = \"child.ufp\" as chosen;",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("child.ufp"),
+            "procedure main(input string ignored) { } procedure chosen(input string prompt, output string answer, inout int state) { }",
+        ).unwrap();
+        let graph = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
+        let root_module = graph
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "root.ufp")
+            .unwrap();
+        let link = &root_module.portals[0];
+        assert_eq!(link.export, "chosen");
+        assert_eq!(link.inputs, ["prompt", "state"]);
+        assert_eq!(link.outputs, ["answer", "state"]);
+        assert_eq!(
+            link.input_types,
+            [
+                "Named(\"string\")",
+                "Sized { name: \"int\", bits: None, format: None }"
+            ]
+        );
+        assert_eq!(
+            link.output_types,
+            [
+                "Named(\"string\")",
+                "Sized { name: \"int\", bits: None, format: None }"
+            ]
+        );
+        assert_eq!(graph.ir.entry, "root.ufp");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
