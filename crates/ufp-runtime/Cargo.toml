@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Reference interpreter for Uncle Frank's Plan (.ufp)"
 
 [dependencies]
+ufp-ir = { path = "../ufp-ir" }
 ufp-syntax = { path = "../ufp-syntax" }
 ufp-types = { path = "../ufp-types" }
 serde_json = "1"
