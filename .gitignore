@@ -1,0 +1,29 @@
+# Rust
+target/
+**/target/
+*.rs.bk
+
+# Node / web
+node_modules/
+dist/
+frontend/dist/
+.vite/
+
+# Build artifacts from the compiler
+artifacts/
+*.o
+*.a
+*.so
+*.dylib
+*.wasm
+
+# Editors & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local config
+.env
+*.log
+/tmp/

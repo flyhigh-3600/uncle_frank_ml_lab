@@ -1,0 +1,20 @@
+// generate.ufp — iteration is a bounded fold, never a loop.
+// `.`  = current accumulator
+// `..` = enclosing procedure's result
+// Syntax is provisional (Q7/Q14): the pipe-call sugar is the least settled part.
+
+@T(0)
+procedure generate(
+    input  string prompt,
+    input  Qwen_3_4b model,
+    output list<int> tokens
+) {
+    let seed = tokenizer.encode(prompt);
+
+    tokens = seed run(
+        token_tools.(tokens, .) concat(tokens)
+        until (condition(. == model.end_token or tokens.length > 1024))
+    );
+
+    return tokens;
+}

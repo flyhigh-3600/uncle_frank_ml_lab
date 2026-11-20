@@ -1,0 +1,16 @@
+// portal_demo.ufp — one plan eating another.
+// Double-clicking `generate` in the editor opens ./qwen3_4b.ufp in a nested tab.
+
+portal qwen = "./qwen3_4b.ufp" as Qwen_3_4b;
+
+@T(0)
+node encode : tokenizer.encode(text = "hello, frank");
+
+@T(0.1)
+node generate : Qwen_3_4b(prompt = encode.out, max_tokens = 1024);
+
+@T(1)
+node decode : tokenizer.decode(tokens = generate.out);
+
+pipe encode.out -> generate.prompt;
+pipe generate.out -> decode.tokens;

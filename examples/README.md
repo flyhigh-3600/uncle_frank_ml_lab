@@ -1,0 +1,15 @@
+# Examples — the intended shape of `.ufp`
+
+These are **design targets**, not yet parsed by anything: the lexer/parser work is
+UF-101…UF-103. They exist so the grammar stays honest. Expect churn until the
+decision log settles Q1–Q15.
+
+| File | Exercises |
+|---|---|
+| `hello.ufp` | procedures, pins, matrix literal, indexing |
+| `predict.ufp` | relational pin constraints, `if/elif/else` |
+| `structured.ufp` | `structured`, dot access, element-wise comparison |
+| `portal_demo.ufp` | `Portal`, top-level nodes, pipes, `@T` zones |
+| `generate.ufp` | bounded fold (`run … until`), `.`, `..`, `condition` |
+
+`.txt` files are inert; see `notes.txt`.

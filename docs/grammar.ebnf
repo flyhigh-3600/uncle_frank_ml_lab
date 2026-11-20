@@ -1,0 +1,162 @@
+(* ============================================================
+   Uncle Frank's Plan — grammar, draft v0.1
+   Companion to docs/SPEC.md. Lexer tokens are shown in quotes;
+   everything else is EBNF (ISO-ish, with [ ] optional, { } repetition).
+   ============================================================ *)
+
+(* ---------- 1. Files and top level ---------- *)
+
+plan            = { top_level } EOF ;
+top_level       = import_decl
+                | portal_decl
+                | text_decl
+                | procedure_decl
+                | node_decl
+                | pipe_decl
+                | annotation ;
+
+import_decl     = "import" qualified [ "from" STRING ] [ "as" ident ] ";" ;
+portal_decl     = "portal" ident "=" STRING [ "as" ident ] ";" ;
+text_decl       = "text" ident "=" STRING ";" ;          (* .txt attachment: inert *)
+
+(* ---------- 2. Procedures and pins ---------- *)
+
+procedure_decl  = { annotation } "procedure" ident
+                  "(" [ pin_list ] ")" ( block | graph_block ) ;
+
+pin_list        = pin { "," pin } ;
+pin             = [ direction ] ( type | "auto" )
+                  [ "with" constraint { ( "and" | "," ) constraint } ]
+                  [ ident ] ;
+direction       = "input" | "output" | "inout" ;
+
+graph_block     = "graph" "{" { graph_item } "}" ;
+graph_item      = node_decl | pipe_decl | annotation ;
+
+(* ---------- 3. Instances and pipes ---------- *)
+
+node_decl       = { annotation } "node" ident ":" qualified
+                  "(" [ binding_list ] ")" ";" ;
+binding_list    = binding { "," binding } ;
+binding         = ident "=" expr ;
+
+pipe_decl       = { annotation } "pipe" [ ident ":" ] endpoint "->" endpoint ";" ;
+endpoint        = ident "." ident ;                      (* node.port *)
+qualified       = ident { "." ident } ;
+
+(* ---------- 4. Statements ---------- *)
+
+block           = "{" { statement } "}" ;
+statement       = let_stmt
+                | assign_stmt
+                | if_stmt
+                | return_stmt
+                | pipe_decl
+                | node_decl
+                | expr_stmt ;
+
+let_stmt        = "let" ident [ ":" type ] "=" expr ";" ;
+assign_stmt     = lvalue "=" expr ";" ;
+if_stmt         = "if" "(" expr ")" block
+                  { "elif" "(" expr ")" block }
+                  [ "else" block ] ;
+return_stmt     = "return" [ expr ] ";" ;
+expr_stmt       = expr ";" ;
+lvalue          = postfix ;
+
+(* ---------- 5. Expressions ---------- *)
+
+expr            = or_expr ;
+or_expr         = and_expr { "or" and_expr } ;
+and_expr        = cmp_expr { "and" cmp_expr } ;
+cmp_expr        = add_expr [ cmp_op add_expr ] ;
+cmp_op          = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
+mul_expr        = unary { ( "*" | "/" | "%" ) unary } ;
+unary           = [ "-" | "not" | "~" ] postfix ;
+
+postfix         = primary { field_access | index | invoke | call | run_expr } ;
+
+field_access    = "." ident ;
+index           = "[" expr { "," expr } "]" ;
+invoke          = "." "(" [ args ] ")" ;                 (* f.(x): bind pins *)
+call            = "(" [ args ] ")" ;                     (* g(x): piped value first *)
+run_expr        = "run" "(" expr "until" "(" expr ")" ")" ;
+
+primary         = literal
+                | current
+                | origin
+                | ident
+                | "(" expr ")"
+                | struct_lit
+                | list_lit
+                | matrix_lit
+                | condition_lit ;
+
+current         = "." ;                                  (* fold accumulator *)
+origin          = ".." ;                                 (* enclosing result *)
+
+struct_lit      = "structured" "{" [ field_init { "," field_init } ] "}" ;
+field_init      = ( type ident | ident ) [ "=" expr ] ;
+list_lit        = "[" [ expr { "," expr } ] "]" ;
+matrix_lit      = "matrix" [ "<" type ">" ] "[" dim_list "]"
+                  "{" [ expr { "," expr } ] "}" ;
+condition_lit   = "condition" "(" expr ")" ;
+
+args            = expr { "," expr } ;
+
+(* A bare "." is a field access when it follows an expression and the fold
+   accumulator when it stands alone. The parser resolves this by position:
+   field_access is only tried inside postfix, current only in primary. *)
+
+(* ---------- 6. Types ---------- *)
+
+type            = "bool"
+                | "int" [ "<" INT ">" ]
+                | "float"
+                | "double"
+                | "string"
+                | "binary"
+                | "sheet" [ "<" type ">" ]
+                | "list" [ "<" type ">" ]
+                | "matrix" [ "<" ( type | INT ) ">" ] "[" dim_list "]"
+                | "structured" "{" [ field_type { "," field_type } ] "}"
+                | "condition" [ "(" expr ")" ]
+                | ident ;
+
+dim_list        = dim { "," dim } ;
+dim             = INT | ident | expr ;
+
+field_type      = type ident [ "=" expr ] ;
+
+(* Ambiguity, deliberate and documented (Q1): matrix<3>[3,3] parses with
+   "<3>" as a rank assertion, while matrix<float>[3,3] uses "<float>" as the
+   element type. Canonical form is the latter. *)
+
+(* ---------- 7. Constraints, annotations, literals ---------- *)
+
+constraint      = expr cmp_op expr ;
+
+annotation      = "@" ident [ "(" [ annotation_arg { "," annotation_arg } ] ")" ] ;
+annotation_arg  = expr | ident | zone_path ;
+
+zone_path       = INT { "." INT } ;                      (* T(0.1.2) *)
+
+literal         = INT | FLOAT | STRING | "true" | "false" | "null" ;
+
+(* ---------- 8. Lexical notes ---------- *)
+
+(*
+   ident        = (letter | "_") { letter | digit | "_" } ;
+   INT          = digit { digit } | "0x" hexdigit { hexdigit } ;
+   FLOAT        = digit { digit } "." digit { digit } [ exponent ] ;
+   STRING       = '"' { escaped_char | char } '"' ;
+   line_comment = "//" { any_char } newline ;
+   block_comment= "/*" { any_char } "*/" ;
+   whitespace   = space | tab | newline | carriage_return ;
+
+   Keywords (reserved): procedure, node, pipe, portal, import, text, graph,
+   input, output, inout, with, and, or, not, if, elif, else, return, let,
+   run, until, structured, condition, matrix, list, sheet, string, binary,
+   bool, int, float, double, true, false, null, auto, as, from, T.
+*)

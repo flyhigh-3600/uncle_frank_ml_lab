@@ -1,0 +1,12 @@
+// hello.ufp — the smallest plan with meat on it.
+// A matrix literal, indexing, and a typed output pin.
+
+procedure main(
+    input  matrix<float>[2,2] a,
+    output float corner
+) {
+    let identity = matrix<float>[2,2]{ 1.0, 0.0, 0.0, 1.0 };
+    let b = a + identity;
+    corner = b[0,0];
+    return corner;
+}

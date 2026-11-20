@@ -1,0 +1,21 @@
+// predict.ufp — relational pins and conditionals.
+// The constraints are solved at link time; a caller that wires a 199-row
+// matrix into y_pred gets an error before anything runs.
+
+procedure predict(
+    input  matrix<float>[200,2] y_pred with y_pred.shape = y_true.shape,
+    input  matrix<float>[200,2] y_true with y_true.shape = y_pred.shape,
+    output matrix<float>[200,2] out_pred with out_pred.shape = y_true.shape
+) {
+    let similarity = y_pred @ transpose(y_pred);
+
+    if (mean(similarity) > 0.5) {
+        out_pred = similarity;
+    } elif (mean(similarity) == 0.5) {
+        out_pred = y_true;
+    } else {
+        out_pred = zero_like(y_pred);
+    }
+
+    return out_pred;
+}

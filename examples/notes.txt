@@ -1,0 +1,7 @@
+This file is a .txt. It does absolutely nothing.
+
+It is not compiled. It is not imported. It is not type-checked.
+It is where the lab notes live: half-finished ideas, warnings from the
+night shift, and the occasional apology to the specimens.
+
+— F.
