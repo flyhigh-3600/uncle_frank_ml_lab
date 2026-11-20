@@ -261,19 +261,18 @@ fn lower_procedure_body(
                         kind:ufp_ir::EdgeKind::Data, span:statement.span });
                 }
             }
-            SyntaxKind::If => return Err(RunError(format!(
-                "unsupported conditional in procedure `{procedure_name}`; control-flow region lowering is not implemented"
-            ))),
+            SyntaxKind::If => lower_if_region(source, statement, portal_links, procedure_name, &mut graph)?,
             SyntaxKind::Let | SyntaxKind::Assign | SyntaxKind::Return | SyntaxKind::ExpressionStatement => {
-                if statement.expression.as_ref().is_some_and(contains_fold) {
+                if let Some(ufp_syntax::Expr { kind: ExprKind::RunUntil { value, condition }, .. }) = statement.expression.as_ref() {
+                    lower_fold_region(value, condition, statement.span, &mut graph);
+                } else if statement.expression.as_ref().is_some_and(contains_fold) {
+                    return Err(RunError(format!("unsupported nested fold expression in procedure `{procedure_name}`")));
+                } else {
                     return Err(RunError(format!(
-                        "unsupported fold/run-until expression in procedure `{procedure_name}`; fold lowering is not implemented"
+                        "unsupported {:?} expression/statement in procedure `{procedure_name}`",
+                        statement.kind
                     )));
                 }
-                return Err(RunError(format!(
-                    "unsupported {:?} expression/statement in procedure `{procedure_name}`; only node declarations and pipes are currently lowerable",
-                    statement.kind
-                )));
             }
             _ => return Err(RunError(format!(
                 "unsupported {:?} statement in procedure `{procedure_name}`; only node declarations and pipes are currently lowerable",
@@ -281,7 +280,7 @@ fn lower_procedure_body(
             ))),
         }
     }
-    graph.edges = pipes;
+    graph.edges.extend(pipes);
     let errors = graph.validate();
     if !errors.is_empty() {
         return Err(RunError(format!(
@@ -295,6 +294,436 @@ fn lower_procedure_body(
     }
     let _ = source;
     Ok(Some(graph))
+}
+
+fn lower_if_region(
+    source: &str,
+    statement: &ufp_syntax::SyntaxNode,
+    portal_links: &[ufp_ir::ModulePortal],
+    procedure_name: &str,
+    graph: &mut ufp_ir::Graph,
+) -> Result<(), RunError> {
+    use ufp_syntax::SyntaxKind;
+    let id = format!("if_{}", statement.span.start);
+    let mut region = ufp_ir::Graph::default();
+    let mut mode = "if";
+    let mut predicate: Option<ufp_syntax::Expr> = None;
+    let mut branches = Vec::new();
+    let mut else_block = None;
+    let mut index = 0usize;
+    for child in &statement.children {
+        match child.kind {
+            SyntaxKind::Expression => predicate = child.expression.clone(),
+            SyntaxKind::Operator => {
+                if let Some(token) = &child.token {
+                    if token.text == "elif" {
+                        mode = "elif";
+                    }
+                    if token.text == "else" {
+                        mode = "else";
+                    }
+                }
+            }
+            SyntaxKind::Block if mode == "else" => else_block = Some(child),
+            SyntaxKind::Block => {
+                let expr = predicate.take().ok_or_else(|| {
+                    RunError("conditional is missing a predicate expression".into())
+                })?;
+                let pred_id = format!("{id}_predicate_{index}");
+                let branch_id = format!("{id}_branch_{index}");
+                let mut pred = control_node(
+                    &pred_id,
+                    "predicate",
+                    ufp_ir::NodeKind::Operation,
+                    vec![],
+                    vec![ufp_ir::Port {
+                        name: "condition".into(),
+                        ty: ufp_types::Type::Condition,
+                        required: false,
+                        variadic: false,
+                    }],
+                    expr.span,
+                );
+                region
+                    .metadata
+                    .insert(format!("{pred_id}.expression"), format!("{:?}", expr.kind));
+                region
+                    .metadata
+                    .insert(format!("{branch_id}.mode"), mode.into());
+                region.metadata.insert(
+                    format!("{branch_id}.gate"),
+                    if mode == "if" {
+                        "current_predicate_true".into()
+                    } else {
+                        "all_previous_predicates_false_and_current_true".into()
+                    },
+                );
+                pred.name = mode.into();
+                region.nodes.push(pred);
+                let branch_graph =
+                    lower_nested_region(source, &child.children, portal_links, procedure_name)?;
+                region.nodes.push(
+                    control_node(
+                        &branch_id,
+                        "branch",
+                        ufp_ir::NodeKind::Region,
+                        vec![ufp_ir::Port {
+                            name: "condition".into(),
+                            ty: ufp_types::Type::Condition,
+                            required: true,
+                            variadic: false,
+                        }],
+                        vec![],
+                        child.span,
+                    )
+                    .with_region(branch_graph),
+                );
+                region.edges.push(ufp_ir::Edge {
+                    id: format!("{pred_id}->{branch_id}"),
+                    from: pred_id,
+                    from_port: "condition".into(),
+                    to: branch_id.clone(),
+                    to_port: "condition".into(),
+                    kind: ufp_ir::EdgeKind::Data,
+                    span: child.span,
+                });
+                branches.push(branch_id);
+                index += 1;
+                mode = "elif";
+            }
+            _ => {}
+        }
+    }
+    if let Some(block) = else_block {
+        let else_id = format!("{id}_else");
+        let nested = lower_nested_region(source, &block.children, portal_links, procedure_name)?;
+        region.nodes.push(
+            control_node(
+                &else_id,
+                "else",
+                ufp_ir::NodeKind::Region,
+                vec![],
+                vec![],
+                block.span,
+            )
+            .with_region(nested),
+        );
+        region
+            .metadata
+            .insert(format!("{else_id}.mode"), "else".into());
+        region.metadata.insert(
+            format!("{else_id}.gate"),
+            "all_previous_predicates_false".into(),
+        );
+        branches.push(else_id);
+    }
+    let merge_id = format!("{id}_merge");
+    region.nodes.push(
+        control_node(
+            &merge_id,
+            "merge",
+            ufp_ir::NodeKind::Region,
+            vec![],
+            vec![],
+            statement.span,
+        )
+        .with_region(ufp_ir::Graph::default()),
+    );
+    region
+        .metadata
+        .insert(format!("{id}.branches"), branches.join(","));
+    region
+        .metadata
+        .insert(format!("{merge_id}.semantics"), "join branch exits".into());
+    if let Some(error) = region.validate().first() {
+        return Err(RunError(format!(
+            "conditional region validation: {}",
+            error.message
+        )));
+    }
+    graph.nodes.push(
+        control_node(
+            &id,
+            "if-region",
+            ufp_ir::NodeKind::Region,
+            vec![],
+            vec![],
+            statement.span,
+        )
+        .with_region(region),
+    );
+    Ok(())
+}
+
+fn lower_nested_region(
+    source: &str,
+    statements: &[ufp_syntax::SyntaxNode],
+    portal_links: &[ufp_ir::ModulePortal],
+    procedure_name: &str,
+) -> Result<ufp_ir::Graph, RunError> {
+    let mut graph = ufp_ir::Graph::default();
+    for statement in statements {
+        match statement.kind {
+            ufp_syntax::SyntaxKind::Node => {
+                lower_node_for_region(source, statement, portal_links, &mut graph)?
+            }
+            ufp_syntax::SyntaxKind::Pipe => {
+                let expr = statement
+                    .children
+                    .iter()
+                    .find_map(|n| n.expression.as_ref())
+                    .ok_or_else(|| RunError("pipe has no parsed port chain".into()))?;
+                let ufp_syntax::ExprKind::PortChain { links } = &expr.kind else {
+                    return Err(RunError(format!(
+                        "unsupported pipe in conditional `{procedure_name}`"
+                    )));
+                };
+                for pair in links.windows(2) {
+                    let (from, from_port) = pipe_endpoint(&pair[0])?;
+                    let (to, to_port) = pipe_endpoint(&pair[1])?;
+                    graph.edges.push(ufp_ir::Edge {
+                        id: format!("{from}:{from_port}->{to}:{to_port}"),
+                        from,
+                        from_port,
+                        to,
+                        to_port,
+                        kind: ufp_ir::EdgeKind::Data,
+                        span: statement.span,
+                    });
+                }
+            }
+            ufp_syntax::SyntaxKind::If => {
+                lower_if_region(source, statement, portal_links, procedure_name, &mut graph)?
+            }
+            ufp_syntax::SyntaxKind::Let | ufp_syntax::SyntaxKind::Assign => {
+                if let Some(ufp_syntax::Expr {
+                    kind: ufp_syntax::ExprKind::RunUntil { value, condition },
+                    ..
+                }) = statement.expression.as_ref()
+                {
+                    lower_fold_region(value, condition, statement.span, &mut graph);
+                } else {
+                    return Err(RunError(format!(
+                        "unsupported {:?} inside conditional region",
+                        statement.kind
+                    )));
+                }
+            }
+            _ => {
+                return Err(RunError(format!(
+                    "unsupported {:?} inside conditional region",
+                    statement.kind
+                )))
+            }
+        }
+    }
+    Ok(graph)
+}
+
+fn pipe_endpoint(expr: &ufp_syntax::Expr) -> Result<(String, String), RunError> {
+    if let ufp_syntax::ExprKind::Field { base, name } = &expr.kind {
+        if let ufp_syntax::ExprKind::Identifier(node) = &base.kind {
+            return Ok((node.clone(), name.clone()));
+        }
+    }
+    Err(RunError("pipe endpoint must be `node.port`".into()))
+}
+
+fn lower_node_for_region(
+    source: &str,
+    statement: &ufp_syntax::SyntaxNode,
+    portal_links: &[ufp_ir::ModulePortal],
+    graph: &mut ufp_ir::Graph,
+) -> Result<(), RunError> {
+    use ufp_syntax::SyntaxKind;
+    let ids = statement
+        .children
+        .iter()
+        .filter(|c| c.kind == SyntaxKind::Identifier)
+        .filter_map(|c| c.token.as_ref().map(|t| t.text.clone()))
+        .collect::<Vec<_>>();
+    let id = ids
+        .first()
+        .ok_or_else(|| RunError("node declaration is missing a name".into()))?;
+    let raw = source
+        .get(statement.span.start..statement.span.end)
+        .unwrap_or_default();
+    let target = raw
+        .split_once(':')
+        .map(|(_, r)| r.trim())
+        .map(|r| {
+            r.split_once('(')
+                .map(|(t, _)| t.trim())
+                .unwrap_or_else(|| r.trim_end_matches(';').trim())
+        })
+        .ok_or_else(|| RunError(format!("node `{id}` has no target")))?;
+    if let Some(link) = portal_links.iter().find(|p| p.node == target) {
+        graph.nodes.push(control_node(
+            id,
+            target,
+            ufp_ir::NodeKind::Portal,
+            link.inputs
+                .iter()
+                .zip(&link.input_types)
+                .map(|(name, ty)| ufp_ir::Port {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    required: true,
+                    variadic: false,
+                })
+                .collect(),
+            link.outputs
+                .iter()
+                .zip(&link.output_types)
+                .map(|(name, ty)| ufp_ir::Port {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    required: false,
+                    variadic: false,
+                })
+                .collect(),
+            statement.span,
+        ));
+    } else {
+        graph
+            .metadata
+            .insert(format!("node.{id}.callee"), target.into());
+        graph.nodes.push(control_node(
+            id,
+            target,
+            ufp_ir::NodeKind::Operation,
+            vec![],
+            vec![ufp_ir::Port {
+                name: "out".into(),
+                ty: ufp_types::Type::Auto,
+                required: false,
+                variadic: false,
+            }],
+            statement.span,
+        ));
+    }
+    Ok(())
+}
+
+fn lower_fold_region(
+    value: &ufp_syntax::Expr,
+    condition: &ufp_syntax::Expr,
+    span: ufp_syntax::Span,
+    graph: &mut ufp_ir::Graph,
+) {
+    let id = format!("fold_{}", span.start);
+    let body = control_node(
+        &format!("{id}_body"),
+        "fold-body",
+        ufp_ir::NodeKind::Operation,
+        vec![ufp_ir::Port {
+            name: "carry".into(),
+            ty: ufp_types::Type::Auto,
+            required: false,
+            variadic: false,
+        }],
+        vec![ufp_ir::Port {
+            name: "next".into(),
+            ty: ufp_types::Type::Auto,
+            required: false,
+            variadic: false,
+        }],
+        value.span,
+    );
+    let predicate = control_node(
+        &format!("{id}_predicate"),
+        "fold-condition",
+        ufp_ir::NodeKind::Operation,
+        vec![],
+        vec![ufp_ir::Port {
+            name: "condition".into(),
+            ty: ufp_types::Type::Condition,
+            required: false,
+            variadic: false,
+        }],
+        condition.span,
+    );
+    let mut region = ufp_ir::Graph {
+        nodes: vec![body, predicate],
+        ..Default::default()
+    };
+    region
+        .metadata
+        .insert("fold.value_expression".into(), format!("{:?}", value.kind));
+    region.metadata.insert(
+        "fold.condition_expression".into(),
+        format!("{:?}", condition.kind),
+    );
+    graph.nodes.push(ufp_ir::Node {
+        id: id.clone(),
+        name: "run-until".into(),
+        kind: ufp_ir::NodeKind::Fold,
+        inputs: vec![ufp_ir::Port {
+            name: "carry".into(),
+            ty: ufp_types::Type::Auto,
+            required: false,
+            variadic: false,
+        }],
+        outputs: vec![ufp_ir::Port {
+            name: "next".into(),
+            ty: ufp_types::Type::Auto,
+            required: false,
+            variadic: false,
+        }],
+        zone: None,
+        span,
+        region: Some(Box::new(region)),
+        fold_feedback: true,
+    });
+    graph.edges.push(ufp_ir::Edge {
+        id: format!("{id}_feedback"),
+        from: id.clone(),
+        from_port: "next".into(),
+        to: id.clone(),
+        to_port: "carry".into(),
+        kind: ufp_ir::EdgeKind::FoldFeedback,
+        span,
+    });
+    graph
+        .metadata
+        .insert(format!("{id}.feedback_gate"), "condition_unmet".into());
+    graph.metadata.insert(format!("{id}.fuel"), "10000".into());
+    graph.metadata.insert(
+        format!("{id}.execution_order"),
+        "body_then_condition".into(),
+    );
+}
+
+fn control_node(
+    id: &str,
+    name: &str,
+    kind: ufp_ir::NodeKind,
+    inputs: Vec<ufp_ir::Port>,
+    outputs: Vec<ufp_ir::Port>,
+    span: ufp_syntax::Span,
+) -> ufp_ir::Node {
+    ufp_ir::Node {
+        id: id.into(),
+        name: name.into(),
+        kind,
+        inputs,
+        outputs,
+        zone: None,
+        span,
+        region: None,
+        fold_feedback: false,
+    }
+}
+
+trait WithRegion {
+    fn with_region(self, region: ufp_ir::Graph) -> Self;
+}
+
+impl WithRegion for ufp_ir::Node {
+    fn with_region(mut self, region: ufp_ir::Graph) -> Self {
+        self.region = Some(Box::new(region));
+        self
+    }
 }
 
 /// Resolve portal files relative to the project root, recursively checking
@@ -831,34 +1260,88 @@ mod tests {
     }
 
     #[test]
-    fn conditionals_are_rejected_with_control_flow_diagnostic() {
+    fn lowers_if_elif_else_into_predicate_branch_and_merge_regions() {
         let root = std::env::temp_dir().join(format!("ufp-portal-if-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("root.ufp"),
-            "procedure main(input bool flag) { if (flag) { return; } }",
+            "procedure main(input bool flag) { if (flag) { node branch_op : math.identity(value = 1); } elif (not flag) { } else { } }",
         )
         .unwrap();
-        let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
-        assert!(error.0.contains("unsupported conditional"));
+        let result = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
+        let module = result
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "root.ufp")
+            .unwrap();
+        let control = module
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "if-region")
+            .unwrap()
+            .region
+            .as_ref()
+            .unwrap();
+        assert!(control.nodes.iter().any(|n| n.name == "if"));
+        assert!(control.nodes.iter().any(|n| n.name == "elif"));
+        assert!(control.nodes.iter().any(|n| n.name == "merge"));
+        assert!(control.nodes.iter().any(|n| n.name == "else"));
+        assert_eq!(control.edges.len(), 2);
+        let branch = control.nodes.iter().find(|n| n.name == "branch").unwrap();
+        assert!(branch
+            .region
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.id == "branch_op"));
+        assert!(control
+            .metadata
+            .values()
+            .any(|v| { v == "all_previous_predicates_false_and_current_true" }));
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn folds_are_rejected_with_fold_specific_diagnostic() {
+    fn lowers_run_until_to_fold_region_with_feedback_metadata() {
         let root = std::env::temp_dir().join(format!("ufp-portal-fold-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("root.ufp"),
             r#"
-            procedure main(input string prompt, output string result) {
-                result = prompt run(prompt until (condition(true)));
+            procedure main(input string prompt) {
+                let result = prompt run(prompt until (condition(true)));
             }
         "#,
         )
         .unwrap();
-        let error = resolve_module_graph(&root, Path::new("root.ufp")).unwrap_err();
-        assert!(error.0.contains("fold/run-until"));
+        let result = resolve_module_graph(&root, Path::new("root.ufp")).unwrap();
+        let module = result
+            .ir
+            .modules
+            .iter()
+            .find(|m| m.id == "root.ufp")
+            .unwrap();
+        let fold = module
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.kind == ufp_ir::NodeKind::Fold)
+            .unwrap();
+        assert!(fold.fold_feedback);
+        assert!(fold.region.is_some());
+        assert!(module
+            .graph
+            .edges
+            .iter()
+            .any(|e| e.kind == ufp_ir::EdgeKind::FoldFeedback));
+        assert_eq!(
+            module.graph.metadata[&format!("{}.feedback_gate", fold.id)],
+            "condition_unmet"
+        );
+        assert_eq!(module.graph.metadata[&format!("{}.fuel", fold.id)], "10000");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
