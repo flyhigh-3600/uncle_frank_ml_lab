@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 fn usage() {
-    eprintln!("usage: ufp <tokens|parse|run|compile> <file.ufp> [--set name=text] | ufp compile <file.ufp> <output>");
+    eprintln!("usage: ufp <tokens|parse|check|run|compile> <file.ufp> [--set name=text] | ufp compile <file.ufp> <output>");
 }
 
 fn main() -> ExitCode {
@@ -38,12 +38,32 @@ fn main() -> ExitCode {
             }
             Err(diagnostics) => print_errors(&path, &diagnostics),
         },
+        "check" => check(&path, &source),
         "run" => run(&path, &source, args),
         "compile" => compile(&path, &source, args),
         _ => {
             usage();
             ExitCode::from(2)
         }
+    }
+}
+
+fn check(path: &str, source: &str) -> ExitCode {
+    let ast = match ufp_syntax::parse_ast(source) {
+        Ok(ast) => ast,
+        Err(diagnostics) => return print_errors(path, &diagnostics),
+    };
+    let diagnostics = ufp_types::check_ast(&ast);
+    for d in &diagnostics {
+        eprintln!(
+            "{path}:{}:{}: {}: {}",
+            d.span.line, d.span.column, d.code, d.message
+        );
+    }
+    if diagnostics.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

@@ -253,9 +253,40 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
     let mut checker = Checker {
         diagnostics: Vec::new(),
         globals: BTreeMap::new(),
+        signatures: BTreeMap::new(),
     };
     // Predeclare top-level names to permit forward references.
     for node in &plan.declarations {
+        if node.kind == SyntaxKind::Procedure {
+            if let Some(name) = declaration_name(node) {
+                let pins = node
+                    .children
+                    .iter()
+                    .filter(|n| n.kind == SyntaxKind::Pin)
+                    .filter_map(|pin| {
+                        let direction = pin
+                            .children
+                            .iter()
+                            .find_map(|c| c.token.as_ref())
+                            .map(|t| t.text.as_str())
+                            .unwrap_or("input");
+                        let ty = pin
+                            .type_ast
+                            .as_ref()
+                            .and_then(|t| type_from_ast(t).ok())
+                            .unwrap_or(Type::Auto);
+                        let pin_name = pin
+                            .children
+                            .iter()
+                            .find(|c| c.kind == SyntaxKind::Identifier)
+                            .and_then(|c| c.token.as_ref())
+                            .map(|t| t.text.clone())?;
+                        Some((direction.to_owned(), pin_name, ty))
+                    })
+                    .collect();
+                checker.signatures.insert(name, pins);
+            }
+        }
         if let Some(name) = declaration_name(node) {
             checker.globals.insert(
                 name,
@@ -266,8 +297,33 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
             );
         }
     }
+    // Imports and portals are names in the surrounding module namespace. Their
+    // members are intentionally opaque until a module loader supplies exports.
     for node in &plan.declarations {
-        checker.check_node(node, &mut checker.globals.clone());
+        if let Some(import) = &node.import_ast {
+            let name = import.alias.clone().or_else(|| import.path.last().cloned());
+            if let Some(name) = name {
+                checker.globals.insert(name, Type::Named("module".into()));
+            }
+        } else if node.kind == SyntaxKind::Portal {
+            if let Some(name) = declaration_name(node) {
+                checker.globals.insert(name, Type::Named("portal".into()));
+                if let Some(alias) = node
+                    .children
+                    .iter()
+                    .filter_map(|c| c.token.as_ref())
+                    .find(|t| t.text == "as")
+                    .and_then(|_| node.children.last())
+                    .and_then(|c| c.token.as_ref())
+                    .map(|t| t.text.clone())
+                {
+                    checker.globals.insert(alias, Type::Named("portal".into()));
+                }
+            }
+        }
+    }
+    for node in &plan.declarations {
+        checker.check_node(node, &mut vec![checker.globals.clone()]);
     }
     checker.diagnostics
 }
@@ -275,6 +331,7 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
 struct Checker {
     diagnostics: Vec<TypeDiagnostic>,
     globals: BTreeMap<String, Type>,
+    signatures: BTreeMap<String, Vec<(String, String, Type)>>,
 }
 impl Checker {
     fn error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
@@ -284,15 +341,20 @@ impl Checker {
             span,
         });
     }
-    fn check_node(&mut self, node: &SyntaxNode, env: &mut BTreeMap<String, Type>) {
+    fn check_node(&mut self, node: &SyntaxNode, env: &mut Vec<BTreeMap<String, Type>>) {
         if let Some(ast) = &node.type_ast {
             if let Err(e) = type_from_ast(ast) {
                 self.error("UFP3201", e, node.span);
             }
         }
         if node.kind == SyntaxKind::Procedure {
-            let mut local = self.globals.clone();
-            for pin in node.children.iter().filter(|n| n.kind == SyntaxKind::Pin) {
+            let mut local = vec![self.globals.clone(), BTreeMap::new()];
+            let pins: Vec<_> = node
+                .children
+                .iter()
+                .filter(|n| n.kind == SyntaxKind::Pin)
+                .collect();
+            for pin in &pins {
                 let name = pin
                     .children
                     .iter()
@@ -306,9 +368,14 @@ impl Checker {
                     .and_then(|t| type_from_ast(t).ok())
                     .unwrap_or(Type::Auto);
                 if !name.is_empty() {
-                    local.insert(name, ty.clone());
+                    local.last_mut().unwrap().insert(name, ty.clone());
                 }
+            }
+            for pin in pins {
                 for constraint in &pin.constraints {
+                    if self.check_shape_constraint(constraint, &local) {
+                        continue;
+                    }
                     let got = self.infer(constraint, &local);
                     if !matches!(got, Type::Bool | Type::Condition | Type::Auto) {
                         self.error("UFP3302", "pin constraint must be boolean", constraint.span);
@@ -338,7 +405,47 @@ impl Checker {
                     .and_then(|c| c.token.as_ref())
                     .map(|t| t.text.clone())
                 {
-                    env.insert(name, actual);
+                    env.last_mut().unwrap().insert(name, actual);
+                }
+            }
+        }
+        // A block is a lexical scope; definitions flow between statements in
+        // that block but never escape to its parent.
+        if node.kind == SyntaxKind::Block {
+            env.push(BTreeMap::new());
+            for child in &node.children {
+                self.check_node(child, env);
+            }
+            env.pop();
+            return;
+        }
+        if node.expression.is_some() {
+            if let Some(lhs) = node.children.first().and_then(|n| n.expression.as_ref()) {
+                if let ExprKind::Scope { depth, name, .. } = &lhs.kind {
+                    if *depth > 1 {
+                        self.error(
+                            "UFP3102",
+                            format!("cannot write to outer-scope binding `{name}`"),
+                            lhs.span,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(Expr {
+            kind: ExprKind::Binary { op, left, .. },
+            ..
+        }) = &node.expression
+        {
+            if op == "=" {
+                if let ExprKind::Scope { depth, name, .. } = &left.kind {
+                    if *depth > 1 {
+                        self.error(
+                            "UFP3102",
+                            format!("cannot write to outer-scope binding `{name}`"),
+                            left.span,
+                        );
+                    }
                 }
             }
         }
@@ -346,35 +453,38 @@ impl Checker {
             self.check_node(child, env);
         }
     }
-    fn infer(&mut self, e: &Expr, env: &BTreeMap<String, Type>) -> Type {
+    fn infer(&mut self, e: &Expr, env: &[BTreeMap<String, Type>]) -> Type {
         match &e.kind {
             ExprKind::Literal(v) if v == "true" || v == "false" => Type::Bool,
             ExprKind::Literal(v) if v == "null" => Type::Auto,
-            ExprKind::Literal(v) if v.starts_with('"') => Type::String,
-            ExprKind::Literal(v) if v.contains('.') || v.contains('e') || v.contains('E') => {
-                Type::Float {
-                    bits: 32,
-                    variant: None,
-                }
-            }
-            ExprKind::Literal(_) => Type::Int(None),
-            ExprKind::Identifier(n) => env.get(n).cloned().unwrap_or_else(|| {
-                self.error("UFP3101", format!("unknown name `{n}`"), e.span);
-                Type::Auto
-            }),
-            ExprKind::Scope { depth, name, .. } => if *depth == 0 {
-                self.globals.get(name).cloned()
-            } else {
-                None
-            }
-            .unwrap_or_else(|| {
-                self.error(
-                    "UFP3101",
-                    format!("unresolved scoped name `{name}`"),
-                    e.span,
-                );
-                Type::Auto
-            }),
+            ExprKind::Literal(v) if v.parse::<i64>().is_ok() => Type::Int(None),
+            ExprKind::Literal(v) if v.parse::<f64>().is_ok() => Type::Float {
+                bits: 32,
+                variant: None,
+            },
+            ExprKind::Literal(_) => Type::String,
+            ExprKind::Identifier(n) => env
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(n))
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.error("UFP3101", format!("unknown name `{n}`"), e.span);
+                    Type::Auto
+                }),
+            ExprKind::Scope { depth, name, .. } => env
+                .len()
+                .checked_sub(*depth)
+                .and_then(|index| env[index].get(name))
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.error(
+                        "UFP3101",
+                        format!("unresolved scoped name `{name}`"),
+                        e.span,
+                    );
+                    Type::Auto
+                }),
             ExprKind::Current => Type::Auto,
             ExprKind::Unary { op, value } => {
                 let t = self.infer(value, env);
@@ -392,11 +502,53 @@ impl Checker {
                 }
             }
             ExprKind::Binary { op, left, right } => {
+                if op == "=" {
+                    let value = self.infer(right, env);
+                    if let ExprKind::Scope { depth, name, .. } = &left.kind {
+                        if *depth > 1 {
+                            self.error(
+                                "UFP3102",
+                                format!("cannot write to outer-scope binding `{name}`"),
+                                left.span,
+                            );
+                        }
+                    }
+                    return value;
+                }
                 let a = self.infer(left, env);
                 let b = self.infer(right, env);
                 match op.as_str() {
                     "and" | "or" if boolish(&a) && boolish(&b) => Type::Bool,
-                    "==" | "!=" | "=" | "<" | "<=" | ">" | ">=" if compatible(&a, &b) => Type::Bool,
+                    "==" | "!=" | "=" | "<" | "<=" | ">" | ">=" if compatible(&a, &b) => match a {
+                        Type::Matrix { rank, dims, .. } => Type::Matrix {
+                            rank,
+                            dims,
+                            elem: Box::new(Type::Bool),
+                        },
+                        _ => Type::Bool,
+                    },
+                    "*" if let (
+                        Type::Matrix { dims: ad, elem, .. },
+                        Type::Matrix { dims: bd, .. },
+                    ) = (&a, &b) =>
+                    {
+                        if ad.len() == 2 && bd.len() == 2 && ad[1] != bd[0] {
+                            self.error(
+                                "UFP3307",
+                                "matrix multiplication inner dimensions do not match",
+                                e.span,
+                            );
+                        }
+                        if ad.len() == 2 && bd.len() == 2 {
+                            Type::Matrix {
+                                rank: Some(2),
+                                dims: vec![ad[0], bd[1]],
+                                elem: elem.clone(),
+                            }
+                        } else {
+                            Type::Auto
+                        }
+                    }
                     "+" | "-" | "*" | ".*" | "/" | "%" if is_numeric(&a) && compatible(&a, &b) => a,
                     _ => {
                         self.error(
@@ -432,22 +584,26 @@ impl Checker {
                     Type::List(ty.map(Box::new))
                 }
             }
-            ExprKind::Structured(fields) => Type::Structured(
-                fields
-                    .iter()
-                    .map(|f| {
-                        let ty =
-                            f.ty.as_ref()
-                                .and_then(|t| type_from_ast(t).ok())
-                                .or_else(|| f.value.as_ref().map(|v| self.infer(v, env)))
-                                .unwrap_or(Type::Auto);
-                        Field {
-                            name: f.name.clone(),
-                            ty,
-                        }
-                    })
-                    .collect(),
-            ),
+            ExprKind::Structured(fields) => {
+                let mut local = env.to_vec();
+                local.push(BTreeMap::new());
+                let mut result = Vec::new();
+                for f in fields {
+                    let ty =
+                        f.ty.as_ref()
+                            .and_then(|t| type_from_ast(t).ok())
+                            .or_else(|| f.value.as_ref().map(|v| self.infer(v, &local)))
+                            .unwrap_or(Type::Auto);
+                    if !f.name.is_empty() {
+                        local.last_mut().unwrap().insert(f.name.clone(), ty.clone());
+                    }
+                    result.push(Field {
+                        name: f.name.clone(),
+                        ty,
+                    });
+                }
+                Type::Structured(result)
+            }
             ExprKind::Field { base, name } => {
                 let t = self.infer(base, env);
                 if let Type::Structured(fs) = t {
@@ -478,7 +634,22 @@ impl Checker {
                 match t {
                     Type::List(Some(t)) => *t,
                     Type::List(None) => Type::Auto,
-                    Type::Matrix { elem, .. } => *elem,
+                    Type::Matrix { elem, dims, .. } => {
+                        if !dims.is_empty() && dims.len() != indices.len() {
+                            self.error(
+                                "UFP3306",
+                                format!(
+                                    "matrix rank {} requires {} indices, found {}",
+                                    dims.len(),
+                                    dims.len(),
+                                    indices.len()
+                                ),
+                                e.span,
+                            );
+                        }
+                        *elem
+                    }
+                    Type::Bool => Type::Bool,
                     other => {
                         self.error("UFP3306", format!("cannot index `{other}`"), e.span);
                         Type::Auto
@@ -491,6 +662,91 @@ impl Checker {
             }
             ExprKind::NamedArg { value, .. } => self.infer(value, env),
             ExprKind::Call { callee, args } | ExprKind::PortMap { callee, args } => {
+                if let ExprKind::Field { base, .. } = &callee.kind {
+                    if let ExprKind::Identifier(alias) = &base.kind {
+                        if matches!(env.iter().rev().find_map(|s| s.get(alias)), Some(Type::Named(kind)) if kind == "module" || kind == "portal")
+                        {
+                            for arg in args {
+                                self.infer(arg, env);
+                            }
+                            return Type::Auto;
+                        }
+                    }
+                }
+                if let ExprKind::Identifier(name) = &callee.kind {
+                    if ["transpose", "mean", "zero_like", "probe"].contains(&name.as_str()) {
+                        let inputs = args
+                            .iter()
+                            .map(|arg| self.infer(arg, env))
+                            .collect::<Vec<_>>();
+                        return match name.as_str() {
+                            "transpose" => match inputs.first() {
+                                Some(Type::Matrix { rank, dims, elem }) if dims.len() == 2 => {
+                                    Type::Matrix {
+                                        rank: *rank,
+                                        dims: vec![dims[1], dims[0]],
+                                        elem: elem.clone(),
+                                    }
+                                }
+                                Some(t) => t.clone(),
+                                None => Type::Auto,
+                            },
+                            "zero_like" => inputs.first().cloned().unwrap_or(Type::Auto),
+                            "mean" => Type::Float {
+                                bits: 32,
+                                variant: None,
+                            },
+                            _ => Type::Auto,
+                        };
+                    }
+                    if let Some(signature) = self.signatures.get(name).cloned() {
+                        let inputs: Vec<_> = signature
+                            .iter()
+                            .filter(|(d, _, _)| d == "input" || d == "inout")
+                            .cloned()
+                            .collect();
+                        if inputs.len() != args.len() {
+                            self.error(
+                                "UFP3203",
+                                format!(
+                                    "`{name}` expects {} input arguments, found {}",
+                                    inputs.len(),
+                                    args.len()
+                                ),
+                                e.span,
+                            );
+                        }
+                        for (arg, (_, pin, expected)) in args.iter().zip(inputs.iter()) {
+                            let actual = self.infer(arg, env);
+                            if !compatible(expected, &actual) {
+                                self.error("UFP3301", format!("argument for `{pin}` expects `{expected}`, found `{actual}`"), arg.span);
+                            }
+                        }
+                        let outputs: Vec<_> = signature
+                            .iter()
+                            .filter(|(d, _, _)| d == "output" || d == "inout")
+                            .collect();
+                        return match outputs.len() {
+                            0 => Type::Auto,
+                            1 => outputs[0].2.clone(),
+                            _ => Type::Structured(
+                                outputs
+                                    .iter()
+                                    .map(|(_, n, t)| Field {
+                                        name: n.clone(),
+                                        ty: t.clone(),
+                                    })
+                                    .collect(),
+                            ),
+                        };
+                    }
+                    if name == "import_gguf" {
+                        for a in args {
+                            self.infer(a, env);
+                        }
+                        return Type::Structured(vec![]);
+                    }
+                }
                 self.infer(callee, env);
                 for a in args {
                     self.infer(a, env);
@@ -517,6 +773,62 @@ impl Checker {
             }
         }
     }
+    fn check_shape_constraint(
+        &mut self,
+        constraint: &Expr,
+        env: &[BTreeMap<String, Type>],
+    ) -> bool {
+        let ExprKind::Binary { op, left, right } = &constraint.kind else {
+            return false;
+        };
+        if op != "=" && op != "==" {
+            return false;
+        }
+        let (
+            ExprKind::Field {
+                base: left_base,
+                name: left_field,
+            },
+            ExprKind::Field {
+                base: right_base,
+                name: right_field,
+            },
+        ) = (&left.kind, &right.kind)
+        else {
+            return false;
+        };
+        if left_field != right_field || !matches!(left_field.as_str(), "shape" | "rank") {
+            return false;
+        }
+        let (ExprKind::Identifier(left_name), ExprKind::Identifier(right_name)) =
+            (&left_base.kind, &right_base.kind)
+        else {
+            return false;
+        };
+        let lookup = |name: &str| env.iter().rev().find_map(|s| s.get(name));
+        let (Some(a), Some(b)) = (lookup(left_name), lookup(right_name)) else {
+            return true;
+        };
+        if let (
+            Type::Matrix {
+                rank: ar, dims: ad, ..
+            },
+            Type::Matrix {
+                rank: br, dims: bd, ..
+            },
+        ) = (a, b)
+        {
+            let mismatch = if left_field == "rank" {
+                ar.is_some() && br.is_some() && ar != br
+            } else {
+                ad.len() == bd.len() && ad.iter().zip(bd).any(|(x, y)| *x != 0 && *y != 0 && x != y)
+            };
+            if mismatch {
+                self.error("UFP3307", format!("constraint requires `{left_name}.{left_field}` to equal `{right_name}.{right_field}`"), constraint.span);
+            }
+        }
+        true
+    }
 }
 fn declaration_name(n: &SyntaxNode) -> Option<String> {
     n.children
@@ -535,7 +847,11 @@ fn boolish(t: &Type) -> bool {
     matches!(t, Type::Bool | Type::Condition | Type::Auto)
 }
 fn compatible(a: &Type, b: &Type) -> bool {
-    a == b || matches!(a, Type::Auto) || matches!(b, Type::Auto) || (is_numeric(a) && is_numeric(b))
+    a == b
+        || matches!(a, Type::Auto)
+        || matches!(b, Type::Auto)
+        || (is_numeric(a) && is_numeric(b))
+        || matches!((a, b), (Type::Matrix { rank: ar, dims: ad, elem: ae }, Type::Matrix { rank: br, dims: bd, elem: be }) if ar == br && ad == bd && compatible(ae, be))
 }
 
 /// First checker pass: validates the D-012 terminal graph before runtime/codegen.
@@ -651,5 +967,51 @@ mod tests {
     fn unknown_expression_names_have_stable_code() {
         let plan = ufp_syntax::parse_ast("procedure p() { missing + 1; }").unwrap();
         assert_eq!(check_ast(&plan)[0].code, "UFP3101");
+    }
+
+    #[test]
+    fn dot_scope_walks_outward_and_rejects_outer_write() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure p(input int x) { let y: int = x; if (true) { let z: int = ..y; ..y = 3; } }",
+        )
+        .unwrap();
+        let diagnostics = check_ast(&plan);
+        assert!(
+            diagnostics.iter().any(|d| d.code == "UFP3102"),
+            "{diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.code == "UFP3101"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn procedure_calls_check_arguments_and_return_output() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure inc(input int x, output int y) { y = x + 1; } procedure p() { let result: int = inc(1); }",
+        ).unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
+    }
+
+    #[test]
+    fn shape_constraints_compare_known_dimensions() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure p(input matrix<2>[2,3] a with a.shape = b.shape, input matrix<2>[2,4] b) {}",
+        )
+        .unwrap();
+        assert!(check_ast(&plan).iter().any(|d| d.code == "UFP3307"));
+    }
+
+    #[test]
+    fn existing_structured_example_parses_and_checks() {
+        let plan = ufp_syntax::parse_ast(include_str!("../../../examples/structured.ufp")).unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
+    }
+
+    #[test]
+    fn existing_predict_example_checks_shape_constraints_and_builtins() {
+        let plan = ufp_syntax::parse_ast(include_str!("../../../examples/predict.ufp")).unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
     }
 }
