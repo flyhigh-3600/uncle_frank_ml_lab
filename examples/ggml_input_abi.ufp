@@ -1,0 +1,10 @@
+// `w` is an embedded literal weight; `x` arrives through the native f32 ABI.
+matrix<2>[3,2] of float<32> w = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+
+procedure main(
+    input matrix<2>[2,3] of float<32> x,
+    output matrix<2>[2,2] of float<32> out
+) {
+    let result = x * w;
+    return result;
+}
