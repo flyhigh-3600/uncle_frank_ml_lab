@@ -807,6 +807,185 @@ pub fn parse_ast_recovering(source: &str) -> (AstPlan, Vec<Diagnostic>) {
     (AstPlan { declarations }, errors)
 }
 
+/// Format supported UFP declarations with four-space indentation.
+///
+/// The current lexer intentionally discards comments, so sources containing
+/// comments are returned unchanged. This preserves comment text and placement
+/// rather than silently losing it. Unsupported or invalid syntax is rejected.
+pub fn format(source: &str) -> Result<String, Vec<Diagnostic>> {
+    let ast = parse_ast(source)?;
+    let (tokens, _) = lex(source);
+    let meaningful: Vec<&Token> = tokens.iter().filter(|t| t.kind != TokenKind::Eof).collect();
+    // Comments are trivia to the lexer. Until it exposes trivia tokens, do not
+    // rewrite such files: preserving the original is the safe fallback.
+    let mut cursor = 0;
+    for token in &meaningful {
+        let gap = &source[cursor..token.span.start];
+        if gap.contains("//") || gap.contains("/*") {
+            return Ok(source.to_owned());
+        }
+        cursor = token.span.end;
+    }
+    if source[cursor..].contains("//") || source[cursor..].contains("/*") {
+        return Ok(source.to_owned());
+    }
+    // Require declarations to cover the lexed source (apart from whitespace).
+    if ast.declarations.is_empty() && !meaningful.is_empty() {
+        return Err(vec![]);
+    }
+    let mut out = String::new();
+    let (mut indent, mut line_start) = (0usize, true);
+    let mut prev = "";
+    let mut depth = 0i32;
+    let mut top_done = false;
+    for token in meaningful {
+        let raw = &source[token.span.start..token.span.end];
+        let text = if matches!(token.kind, TokenKind::String | TokenKind::TextBlock) {
+            raw
+        } else {
+            token.text.as_str()
+        };
+        if text == "}" {
+            indent = indent.saturating_sub(1);
+            if !line_start {
+                out.push('\n');
+                line_start = true;
+            }
+            write_indent(&mut out, indent, &mut line_start);
+            out.push('}');
+        } else if text == "{" {
+            if !line_start {
+                out.push(' ');
+            }
+            out.push('{');
+            out.push('\n');
+            line_start = true;
+            indent += 1;
+        } else if text == ";" {
+            out.push(';');
+            out.push('\n');
+            line_start = true;
+            if depth == 0 {
+                top_done = true;
+            }
+        } else if text == "," {
+            trim_space(&mut out);
+            out.push_str(", ");
+        } else if text == ")" || text == "]" {
+            trim_space(&mut out);
+            out.push_str(text);
+        } else if text == "(" || text == "[" {
+            if needs_space(prev, text) {
+                out.push(' ');
+            }
+            out.push_str(text);
+        } else {
+            if needs_space(prev, text) && !line_start {
+                out.push(' ');
+            }
+            if line_start {
+                write_indent(&mut out, indent, &mut line_start);
+            }
+            out.push_str(text);
+        }
+        if text == "{" {
+            depth += 1;
+        }
+        if text == "}" {
+            depth -= 1;
+            if depth == 0 {
+                out.push('\n');
+                line_start = true;
+                top_done = true;
+            } else {
+                out.push('\n');
+                line_start = true;
+            }
+        }
+        if top_done {
+            while out.ends_with("\n\n") {
+                out.pop();
+            }
+            if !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            top_done = false;
+        }
+        prev = text;
+    }
+    while out.ends_with("\n") {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn write_indent(out: &mut String, indent: usize, line_start: &mut bool) {
+    if *line_start {
+        out.push_str(&"    ".repeat(indent));
+        *line_start = false;
+    }
+}
+fn trim_space(out: &mut String) {
+    while out.ends_with(' ') {
+        out.pop();
+    }
+}
+fn needs_space(prev: &str, next: &str) -> bool {
+    if prev == ">" && next == "[" {
+        return false;
+    }
+    if prev.is_empty()
+        || ["(", "[", ".", "@", "<", ","].contains(&prev)
+        || [")", "]", ".", ",", ";", ">", "(", "<"].contains(&next)
+    {
+        return false;
+    }
+    if [
+        "=", "+", "-", "*", "/", ".*", "->", "==", "!=", "<=", ">=", "and", "or", "as", "from",
+        "of", "with",
+    ]
+    .contains(&prev)
+        || [
+            "=", "+", "-", "*", "/", ".*", "->", "==", "!=", "<=", ">=", "and", "or", "as", "from",
+            "of", "with",
+        ]
+        .contains(&next)
+    {
+        return true;
+    }
+    true
+}
+
+#[cfg(test)]
+mod formatter_tests {
+    use super::format;
+
+    #[test]
+    fn formats_mixed_top_level_forms_idempotently() {
+        let input = "matrix<2>[2,2] of float<32> m = [1,2,3,4]; portal p=\"x\"; procedure main() { let b = m * 2; return b; }";
+        let once = format(input).unwrap();
+        assert_eq!(
+            format(&once).unwrap_or_else(|e| panic!("{e:?}\n{once}")),
+            once
+        );
+        assert!(
+            once.contains("matrix<2>[2, 2] of float<32> m = [1, 2, 3, 4];"),
+            "{once}"
+        );
+        assert!(once.contains("procedure main() {"));
+        assert!(once.contains("    let b = m * 2;"));
+    }
+
+    #[test]
+    fn comment_input_uses_preserving_fallback() {
+        let input = "// keep me\noutput result;";
+        assert_eq!(format(input).unwrap(), input);
+    }
+}
+
 struct AstParser<'a> {
     tokens: &'a [Token],
     at: usize,

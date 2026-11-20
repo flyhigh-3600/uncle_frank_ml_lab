@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 fn usage() {
-    eprintln!("usage: ufp <tokens|parse|check|run|compile> <file.ufp> [--set name=text] | ufp compile <file.ufp> <output>");
+    eprintln!("usage: ufp <tokens|parse|check|fmt|run|compile> <file.ufp> [--set name=text] | ufp compile <file.ufp> <output>");
 }
 
 fn main() -> ExitCode {
@@ -21,6 +21,31 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     };
     match command.as_str() {
+        "fmt" => {
+            let option = args.next();
+            let check_only = option.as_deref() == Some("--check");
+            if option.is_some() && !check_only || args.next().is_some() {
+                eprintln!("ufp: fmt accepts only the optional --check flag");
+                return ExitCode::from(2);
+            }
+            let formatted = match ufp_syntax::format(&source) {
+                Ok(formatted) => formatted,
+                Err(diagnostics) => return print_errors(&path, &diagnostics),
+            };
+            if check_only {
+                if formatted != source {
+                    eprintln!("{path}: formatting required");
+                    ExitCode::from(1)
+                } else {
+                    ExitCode::SUCCESS
+                }
+            } else if let Err(error) = fs::write(&path, formatted) {
+                eprintln!("ufp: cannot write {path}: {error}");
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         "tokens" => {
             let (tokens, diagnostics) = ufp_syntax::lex(&source);
             for t in tokens {
