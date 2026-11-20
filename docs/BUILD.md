@@ -27,6 +27,15 @@ The script configures a CPU build with tests/examples/server disabled. Pass an
 alternative build directory as its first argument. The generated build directory
 is local and must not be committed.
 
-`ufp-codegen` will link this pinned copy when UF-603 implements typed tensor
-partitions. Until then, the submodule is built and version-pinned but not linked
-by the text-only native slice.
+The codegen crate also owns a standalone f32 matrix-multiplication C fixture.
+It exercises `ggml_mul_mat` on the pinned CPU backend and compares all four
+results against known values:
+
+```sh
+./scripts/ggml-matmul-smoke.sh
+```
+
+The optional first argument selects the CMake build directory. This is a native
+ggml/codegen proof only: the fixture is not generated from a UFP plan, and does
+not imply general UFP, model, or quantized-tensor compilation support. The
+existing `ufp compile` command remains the direct text-pipe emitter.

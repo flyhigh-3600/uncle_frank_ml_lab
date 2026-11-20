@@ -67,6 +67,14 @@ pub fn compile_text_plan(plan: &Plan, output: &Path) -> Result<(), String> {
         Err(format!("cc failed with {status}"))
     }
 }
+
+/// Emit a standalone ggml C program proving one f32 matrix multiplication.
+///
+/// This is intentionally a fixed smoke fixture, not a compiler for UFP plans.
+pub fn emit_ggml_matmul_c() -> &'static str {
+    include_str!("../fixtures/ggml_matmul.c")
+}
+
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -81,5 +89,13 @@ mod tests {
     fn emits_c() {
         let p = parse_plan("input x=\"hi\"; output y; pipe x.text -> y.text;").unwrap();
         assert!(emit_text_c(&p).unwrap().contains("y: hi"));
+    }
+
+    #[test]
+    fn ggml_fixture_uses_native_matmul_and_checks_values() {
+        let source = emit_ggml_matmul_c();
+        assert!(source.contains("ggml_mul_mat"));
+        assert!(source.contains("expected"));
+        assert!(source.contains("ggml_backend_graph_compute"));
     }
 }
