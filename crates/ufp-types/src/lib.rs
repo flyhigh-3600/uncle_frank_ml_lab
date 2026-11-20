@@ -27,11 +27,27 @@ pub enum Type {
         dims: Vec<usize>,
         elem: Box<Type>,
     },
+    SymbolicMatrix {
+        rank: Option<Dimension>,
+        dims: Vec<Dimension>,
+        elem: Box<Type>,
+    },
     Structured(Vec<Field>),
     Condition,
     Auto,
     Quant(String),
     Named(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dimension {
+    Known(usize),
+    Variable(String),
+}
+fn dimension_text(d: &Dimension) -> String {
+    match d {
+        Dimension::Known(n) => n.to_string(),
+        Dimension::Variable(name) => name.clone(),
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Float8 {
@@ -79,6 +95,20 @@ impl Type {
                 Err("matrix dimensions must be positive".into())
             }
             Self::Matrix { elem, .. } => elem.valid(),
+            Self::SymbolicMatrix { rank, dims, elem } => {
+                if let (Some(Dimension::Known(rank)), false) = (rank, dims.is_empty()) {
+                    if *rank != dims.len() {
+                        return Err(format!(
+                            "matrix rank {rank} does not match {} dimensions",
+                            dims.len()
+                        ));
+                    }
+                }
+                if dims.iter().any(|d| matches!(d, Dimension::Known(0))) {
+                    return Err("matrix dimensions must be positive".into());
+                }
+                elem.valid()
+            }
             _ => Ok(()),
         }
     }
@@ -124,6 +154,20 @@ impl fmt::Display for Type {
                     "[{}] of {elem}",
                     dims.iter()
                         .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Self::SymbolicMatrix { rank, dims, elem } => {
+                write!(f, "matrix")?;
+                if let Some(rank) = rank {
+                    write!(f, "<{}>", dimension_text(rank))?;
+                }
+                write!(
+                    f,
+                    "[{}] of {elem}",
+                    dims.iter()
+                        .map(dimension_text)
                         .collect::<Vec<_>>()
                         .join(",")
                 )
@@ -206,30 +250,37 @@ pub fn type_from_ast(ast: &TypeAst) -> Result<Type, String> {
             element,
             ..
         } => {
-            let rank = rank
-                .as_deref()
-                .map(|s| {
-                    s.parse::<usize>()
-                        .map_err(|_| format!("invalid matrix rank `{s}`"))
-                })
-                .transpose()?;
+            let rank = rank.as_deref().map(parse_dimension);
             let dims = dimensions
                 .iter()
-                .map(|s| {
-                    s.parse::<usize>()
-                        .map_err(|_| format!("matrix dimension `{s}` is not a constant integer"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Type::Matrix {
-                rank,
-                dims,
-                elem: Box::new(
-                    element
-                        .as_deref()
-                        .map(type_from_ast)
-                        .transpose()?
-                        .unwrap_or(Type::Auto),
-                ),
+                .map(|s| parse_dimension(s))
+                .collect::<Vec<_>>();
+            let elem = Box::new(
+                element
+                    .as_deref()
+                    .map(type_from_ast)
+                    .transpose()?
+                    .unwrap_or(Type::Auto),
+            );
+            if rank
+                .as_ref()
+                .is_some_and(|d| matches!(d, Dimension::Variable(_)))
+                || dims.iter().any(|d| matches!(d, Dimension::Variable(_)))
+            {
+                Type::SymbolicMatrix { rank, dims, elem }
+            } else {
+                let rank = rank.map(|d| match d {
+                    Dimension::Known(n) => n,
+                    _ => unreachable!(),
+                });
+                let dims = dims
+                    .into_iter()
+                    .map(|d| match d {
+                        Dimension::Known(n) => n,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                Type::Matrix { rank, dims, elem }
             }
         }
         TypeAst::Structured(fields) => Type::Structured(
@@ -247,6 +298,11 @@ pub fn type_from_ast(ast: &TypeAst) -> Result<Type, String> {
     ty.valid()?;
     Ok(ty)
 }
+fn parse_dimension(text: &str) -> Dimension {
+    text.parse::<usize>()
+        .map(Dimension::Known)
+        .unwrap_or_else(|_| Dimension::Variable(text.trim().to_owned()))
+}
 
 /// Deterministic static checking over the structured parser AST.
 pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
@@ -254,6 +310,7 @@ pub fn check_ast(plan: &AstPlan) -> Vec<TypeDiagnostic> {
         diagnostics: Vec::new(),
         globals: BTreeMap::new(),
         signatures: BTreeMap::new(),
+        dimensions: BTreeMap::new(),
     };
     // Predeclare top-level names to permit forward references.
     for node in &plan.declarations {
@@ -332,6 +389,7 @@ struct Checker {
     diagnostics: Vec<TypeDiagnostic>,
     globals: BTreeMap<String, Type>,
     signatures: BTreeMap<String, Vec<(String, String, Type)>>,
+    dimensions: BTreeMap<String, Dimension>,
 }
 impl Checker {
     fn error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
@@ -389,6 +447,33 @@ impl Checker {
         }
         if let Some(expr) = &node.expression {
             let actual = self.infer(expr, env);
+            if let ExprKind::Binary { op, left, .. } = &expr.kind {
+                if op == "=" {
+                    let target = match &left.kind {
+                        ExprKind::Identifier(name) => {
+                            env.iter_mut().rev().find_map(|scope| scope.get_mut(name))
+                        }
+                        ExprKind::Scope { depth, name, .. } => {
+                            if *depth > 1 {
+                                self.error(
+                                    "UFP3102",
+                                    format!("cannot write to outer-scope binding `{name}`"),
+                                    left.span,
+                                );
+                                None
+                            } else {
+                                env.last_mut().and_then(|scope| scope.get_mut(name))
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        if matches!(target, Type::Auto) && !matches!(actual, Type::Auto) {
+                            *target = actual.clone();
+                        }
+                    }
+                }
+            }
             if let Some(expected) = node.type_ast.as_ref().and_then(|t| type_from_ast(t).ok()) {
                 if !compatible(&expected, &actual) {
                     self.error(
@@ -525,6 +610,11 @@ impl Checker {
                             dims,
                             elem: Box::new(Type::Bool),
                         },
+                        Type::SymbolicMatrix { rank, dims, .. } => Type::SymbolicMatrix {
+                            rank,
+                            dims,
+                            elem: Box::new(Type::Bool),
+                        },
                         _ => Type::Bool,
                     },
                     "*" if let (
@@ -589,11 +679,15 @@ impl Checker {
                 local.push(BTreeMap::new());
                 let mut result = Vec::new();
                 for f in fields {
-                    let ty =
-                        f.ty.as_ref()
-                            .and_then(|t| type_from_ast(t).ok())
-                            .or_else(|| f.value.as_ref().map(|v| self.infer(v, &local)))
-                            .unwrap_or(Type::Auto);
+                    let annotated = f.ty.as_ref().and_then(|t| type_from_ast(t).ok());
+                    let ty = match annotated {
+                        Some(Type::Auto) | None => f
+                            .value
+                            .as_ref()
+                            .map(|v| self.infer(v, &local))
+                            .unwrap_or(Type::Auto),
+                        Some(ty) => ty,
+                    };
                     if !f.name.is_empty() {
                         local.last_mut().unwrap().insert(f.name.clone(), ty.clone());
                     }
@@ -649,6 +743,21 @@ impl Checker {
                         }
                         *elem
                     }
+                    Type::SymbolicMatrix { elem, dims, .. } => {
+                        if dims.len() != indices.len() {
+                            self.error(
+                                "UFP3306",
+                                format!(
+                                    "matrix rank {} requires {} indices, found {}",
+                                    dims.len(),
+                                    dims.len(),
+                                    indices.len()
+                                ),
+                                e.span,
+                            );
+                        }
+                        *elem
+                    }
                     Type::Bool => Type::Bool,
                     other => {
                         self.error("UFP3306", format!("cannot index `{other}`"), e.span);
@@ -685,6 +794,15 @@ impl Checker {
                                     Type::Matrix {
                                         rank: *rank,
                                         dims: vec![dims[1], dims[0]],
+                                        elem: elem.clone(),
+                                    }
+                                }
+                                Some(Type::SymbolicMatrix { rank, dims, elem })
+                                    if dims.len() == 2 =>
+                                {
+                                    Type::SymbolicMatrix {
+                                        rank: rank.clone(),
+                                        dims: vec![dims[1].clone(), dims[0].clone()],
                                         elem: elem.clone(),
                                     }
                                 }
@@ -778,6 +896,13 @@ impl Checker {
         constraint: &Expr,
         env: &[BTreeMap<String, Type>],
     ) -> bool {
+        if let ExprKind::Binary { op, left, right } = &constraint.kind {
+            if op == "and" {
+                let left_ok = self.check_shape_constraint(left, env);
+                let right_ok = self.check_shape_constraint(right, env);
+                return left_ok && right_ok;
+            }
+        }
         let ExprKind::Binary { op, left, right } = &constraint.kind else {
             return false;
         };
@@ -809,25 +934,70 @@ impl Checker {
         let (Some(a), Some(b)) = (lookup(left_name), lookup(right_name)) else {
             return true;
         };
-        if let (
-            Type::Matrix {
-                rank: ar, dims: ad, ..
-            },
-            Type::Matrix {
-                rank: br, dims: bd, ..
-            },
-        ) = (a, b)
-        {
-            let mismatch = if left_field == "rank" {
-                ar.is_some() && br.is_some() && ar != br
-            } else {
-                ad.len() == bd.len() && ad.iter().zip(bd).any(|(x, y)| *x != 0 && *y != 0 && x != y)
-            };
-            if mismatch {
-                self.error("UFP3307", format!("constraint requires `{left_name}.{left_field}` to equal `{right_name}.{right_field}`"), constraint.span);
+        let Some((ar, ad)) = matrix_dimensions(a) else {
+            return true;
+        };
+        let Some((br, bd)) = matrix_dimensions(b) else {
+            return true;
+        };
+        let mut conflict = false;
+        if left_field == "rank" {
+            conflict |= ad.len() != bd.len();
+            if let (Some(a), Some(b)) = (ar, br) {
+                conflict |= !unify_dimensions(&mut self.dimensions, a, b);
+            }
+        } else {
+            conflict |= ad.len() != bd.len();
+            if ad.len() == bd.len() {
+                for (a, b) in ad.into_iter().zip(bd) {
+                    conflict |= !unify_dimensions(&mut self.dimensions, a, b);
+                }
             }
         }
+        if conflict {
+            self.error("UFP3307", format!("shape constraint conflict: `{left_name}.{left_field}` cannot equal `{right_name}.{right_field}`"), constraint.span);
+        }
         true
+    }
+}
+fn matrix_dimensions(ty: &Type) -> Option<(Option<Dimension>, Vec<Dimension>)> {
+    match ty {
+        Type::Matrix { rank, dims, .. } => Some((
+            rank.map(Dimension::Known),
+            dims.iter().copied().map(Dimension::Known).collect(),
+        )),
+        Type::SymbolicMatrix { rank, dims, .. } => Some((rank.clone(), dims.clone())),
+        _ => None,
+    }
+}
+fn unify_dimensions(
+    bindings: &mut BTreeMap<String, Dimension>,
+    left: Dimension,
+    right: Dimension,
+) -> bool {
+    fn resolve(bindings: &BTreeMap<String, Dimension>, dim: Dimension) -> Dimension {
+        match dim {
+            Dimension::Variable(name) => match bindings.get(&name) {
+                Some(next) if next != &Dimension::Variable(name.clone()) => {
+                    resolve(bindings, next.clone())
+                }
+                _ => Dimension::Variable(name),
+            },
+            known => known,
+        }
+    }
+    match (resolve(bindings, left), resolve(bindings, right)) {
+        (Dimension::Known(a), Dimension::Known(b)) => a == b,
+        (Dimension::Variable(a), Dimension::Known(n))
+        | (Dimension::Known(n), Dimension::Variable(a)) => {
+            bindings.insert(a, Dimension::Known(n));
+            true
+        }
+        (Dimension::Variable(a), Dimension::Variable(b)) if a == b => true,
+        (Dimension::Variable(a), Dimension::Variable(b)) => {
+            bindings.insert(a, Dimension::Variable(b));
+            true
+        }
     }
 }
 fn declaration_name(n: &SyntaxNode) -> Option<String> {
@@ -852,6 +1022,7 @@ fn compatible(a: &Type, b: &Type) -> bool {
         || matches!(b, Type::Auto)
         || (is_numeric(a) && is_numeric(b))
         || matches!((a, b), (Type::Matrix { rank: ar, dims: ad, elem: ae }, Type::Matrix { rank: br, dims: bd, elem: be }) if ar == br && ad == bd && compatible(ae, be))
+        || matches!((matrix_dimensions(a), matrix_dimensions(b)), (Some((ar, ad)), Some((br, bd))) if ar.as_ref().is_none_or(|r| br.as_ref().is_none_or(|other| r == other)) && ad.len() == bd.len() && ad.iter().zip(&bd).all(|(x,y)| x == y || matches!(x, Dimension::Variable(_)) || matches!(y, Dimension::Variable(_))))
 }
 
 /// First checker pass: validates the D-012 terminal graph before runtime/codegen.
@@ -1012,6 +1183,51 @@ mod tests {
     #[test]
     fn existing_predict_example_checks_shape_constraints_and_builtins() {
         let plan = ufp_syntax::parse_ast(include_str!("../../../examples/predict.ufp")).unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
+    }
+
+    #[test]
+    fn symbolic_dimensions_unify_transitively_and_report_one_conflict() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure p(input matrix<2>[n,4] a with a.shape = b.shape and a.shape = c.shape, input matrix<2>[8,4] b, input matrix<2>[9,4] c) {}",
+        ).unwrap();
+        let errors = check_ast(&plan);
+        assert_eq!(
+            errors.iter().map(|d| d.code).collect::<Vec<_>>(),
+            vec!["UFP3307"]
+        );
+        assert!(errors[0].message.contains("shape constraint conflict"));
+    }
+
+    #[test]
+    fn auto_let_infers_from_initializer() {
+        let plan =
+            ufp_syntax::parse_ast("procedure p() { let value: auto = 7; let copy: int = value; }")
+                .unwrap();
+        assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
+    }
+
+    #[test]
+    fn symbolic_type_conversion_keeps_rank_and_dimension_variables() {
+        let ast = ufp_syntax::parse_type("matrix<r>[rows,4] of float").unwrap();
+        assert_eq!(
+            type_from_ast(&ast).unwrap(),
+            Type::SymbolicMatrix {
+                rank: Some(Dimension::Variable("r".into())),
+                dims: vec![Dimension::Variable("rows".into()), Dimension::Known(4)],
+                elem: Box::new(Type::Float {
+                    bits: 32,
+                    variant: None
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn auto_structured_field_infers_its_initializer() {
+        let plan = ufp_syntax::parse_ast(
+            "procedure p() { let value = structured { auto count = 4 }; let total: int = value.count; }",
+        ).unwrap();
         assert!(check_ast(&plan).is_empty(), "{:?}", check_ast(&plan));
     }
 }
