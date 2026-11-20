@@ -100,8 +100,8 @@ pub struct ModulePortal {
     pub export: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
-    pub input_types: Vec<String>,
-    pub output_types: Vec<String>,
+    pub input_types: Vec<Type>,
+    pub output_types: Vec<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
