@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101216">
+  <title>Frank's Plan Editor</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Frank's Plan Editor home"><span class="brand-mark">F</span><span>FRANK'S <b>PLAN EDITOR</b><small>LOCAL WORKSPACE</small></span></a>
+    <div class="crumb">workspace <span>/</span> <strong id="crumb-file">sentiment.ufp</strong><i class="save-dot"></i><small>saved locally</small></div>
+    <div class="top-actions"><span class="local-badge"><i></i> DEMO MODE</span><button class="icon-btn" title="Settings">⚙</button><button class="avatar">UF</button></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-heading"><span>PROJECT</span><button class="icon-btn" id="new-file" title="New file">＋</button></div>
+      <div class="project"><span class="folder-icon">▾</span><span>frank-lab</span><span class="muted">⌄</span></div>
+      <nav class="file-list" aria-label="Project files">
+        <button class="file active" data-file="sentiment.ufp"><span class="file-icon purple">◇</span>sentiment.ufp</button>
+        <button class="file" data-file="layers.ufp"><span class="file-icon purple">◇</span>layers.ufp</button>
+        <button class="file" data-file="notes.txt"><span class="file-icon amber">≡</span>notes.txt</button>
+        <button class="file" data-file="text_io.ufp"><span class="file-icon purple">◇</span>text_io.ufp</button>
+      </nav>
+      <div class="side-bottom"><div class="side-heading"><span>WORKSPACE</span></div><div class="workspace-info"><span class="pulse"></span><span>Local demo workspace<small>No files leave this browser</small></span></div><div class="version">UFP editor <span>prototype 0.1</span></div></div>
+    </aside>
+    <main class="main">
+      <div class="toolbar"><div class="tabs"><button class="tab active" data-view="split">▤ <span>Split view</span></button><button class="tab" data-view="text">≡ <span>Text</span></button><button class="tab" data-view="graph">◇ <span>Graph</span></button></div><div class="toolbar-right"><span class="hint"><kbd>⌘</kbd> <kbd>S</kbd> saved</span><button id="validate" class="button secondary">✓ <span>Validate wiring</span></button><button id="run" class="button run">▶ <span>Run session</span></button></div></div>
+      <section class="editor" id="editor">
+        <div class="pane text-pane"><div class="pane-head"><span><i class="file-icon purple">◇</i> <b id="text-title">sentiment.ufp</b></span><span class="pane-meta">UFP <i>·</i> LOCAL DRAFT</span></div>
+          <div class="code-wrap"><div class="line-numbers" id="line-numbers"></div><textarea id="source" spellcheck="false" aria-label="Plan source"></textarea></div>
+          <div class="pane-foot"><span><i class="good-dot"></i><span id="validation-label">Local draft · not compiled</span></span><span>UTF-8 &nbsp; LF</span></div>
+        </div>
+        <div class="divider"></div>
+        <div class="pane graph-pane"><div class="pane-head"><span><b>Canvas</b><small class="subtle"> · sentiment pipeline</small></span><div class="canvas-tools"><span class="zoom">− &nbsp; 100% &nbsp; +</span><button class="icon-btn" title="Fit canvas">⤢</button></div></div>
+          <div class="canvas" id="canvas"><svg class="wires" id="wires" aria-hidden="true"></svg><div class="canvas-label">DEMO GRAPH <span>·</span> 4 NODES</div>
+            <div class="node node-input" data-node="input" style="left:7%;top:30%" draggable="true"><div class="node-head"><span class="node-icon">↓</span><span>Input</span><span class="node-kind">SOURCE</span></div><div class="node-body"><b>prompt</b><small>text · required</small></div><div class="port output" data-port="prompt">text <i></i></div></div>
+            <div class="node node-process selected" data-node="tokenize" style="left:37%;top:23%" draggable="true"><div class="node-head"><span class="node-icon">✳</span><span>Tokenize</span><span class="node-kind">TEXT</span></div><div class="node-body"><b>split_words</b><small>lowercase · true</small></div><div class="port input" data-port="text"><i></i> text</div><div class="port output" data-port="tokens">tokens <i></i></div></div>
+            <div class="node node-process" data-node="classify" style="left:67%;top:43%" draggable="true"><div class="node-head"><span class="node-icon">◈</span><span>Classify</span><span class="node-kind">MODEL</span></div><div class="node-body"><b>sentiment</b><small>labels · 3</small></div><div class="port input" data-port="tokens"><i></i> tokens</div><div class="port output" data-port="result">result <i></i></div></div>
+            <div class="node node-output" data-node="output" style="left:37%;top:69%" draggable="true"><div class="node-head"><span class="node-icon">↑</span><span>Output</span><span class="node-kind">SINK</span></div><div class="node-body"><b>result</b><small>text · terminal</small></div><div class="port input" data-port="result"><i></i> result</div></div>
+          </div>
+          <div class="canvas-foot"><span><i class="good-dot"></i> <span id="wire-status">Wiring looks connected</span></span><span>Drag nodes to arrange · local demo</span></div>
+        </div>
+      </section>
+      <section class="terminal"><div class="terminal-head"><div><span class="terminal-glyph">›_</span><b>SESSION</b><span class="terminal-session" id="session-state">IDLE</span></div><div class="speed"><span>Speed</span><button data-speed="0.5">0.5×</button><button class="selected" data-speed="1">1×</button><button data-speed="2">2×</button><button data-speed="4">4×</button></div><button id="clear-log" class="clear-btn">Clear</button></div><div class="terminal-content" id="terminal"><div class="log-muted">Local demo session ready. Run to step through this mock plan; no compiler or model is invoked.</div></div></section>
+    </main>
+    <aside class="inspector"><div class="inspector-head"><span>INSPECTOR</span><button class="icon-btn">⋯</button></div><div class="inspect-content"><div class="section-label">SELECTED NODE</div><div class="selected-title"><span class="selected-icon">✳</span><span><b id="inspect-name">Tokenize</b><small id="inspect-type">Text operation</small></span><span class="status-pill">READY</span></div><label class="field-label" for="node-name">Name</label><input class="field" id="node-name" value="split_words"><label class="field-label">Operation</label><button class="field choice">Text · tokenize <span>⌄</span></button><div class="section-label ports-title">PORTS <span>2</span></div><div class="inspect-port"><i class="in-port"></i><span>text<small>Input · text</small></span><span class="connected">CONNECTED</span></div><div class="inspect-port"><i class="out-port"></i><span>tokens<small>Output · token list</small></span><span class="connected">CONNECTED</span></div><div class="section-label params-title">PARAMETERS</div><label class="param-row"><span>Lowercase</span><input type="checkbox" checked id="lowercase"><span class="check"></span></label><div class="section-label portal-title">PORTAL / LAYER</div><div class="portal-card"><div><span class="portal-icon">▧</span><b>text_tools</b><span class="portal-arrow">↗</span></div><small>Portal · 2 inner nodes</small><button id="portal-open">Open portal <span>→</span></button></div><div class="inspector-note">This inspector edits the local demo graph only.</div></div></aside>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
