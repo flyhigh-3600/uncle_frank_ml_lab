@@ -698,6 +698,7 @@ version = "0.1.0"
 name = "ufp-runtime"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "ufp-syntax",
  "ufp-types",
 ]
