@@ -1064,34 +1064,63 @@ pub struct RunResult {
 pub struct RunError(pub String);
 
 /// Values supported by the deliberately small control-flow IR interpreter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ScalarValue {
     Bool(bool),
     Int(i64),
+    Float(f64),
     String(String),
+    List(Vec<ScalarValue>),
+    Structured(BTreeMap<String, ScalarValue>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ControlRunResult {
     pub values: BTreeMap<String, ScalarValue>,
     pub events: Vec<String>,
 }
 
 /// Execute the supported scalar subset of lowered procedure control flow:
-/// integer/bool/string literals, named scalar inputs, `.` in folds, unary `-`
-/// and `not`, integer arithmetic/comparisons, boolean `and`/`or`, and equality.
+/// integer/float/bool/string/list/structured literals, named values, field and
+/// list-index access, `.` in folds, unary `-` and `not`, numeric arithmetic and
+/// comparisons, boolean `and`/`or`, and equality.
 /// `fuel` overrides each fold's metadata budget; `None` uses its recorded
-/// default. Calls, floats, structured values, and operation/portal execution
-/// produce an explicit `RunError`.
+/// default. Calls, unsupported collection operations, and operation/portal
+/// execution produce an explicit `RunError`.
 pub fn execute_control_graph(
     graph: &ufp_ir::Graph,
     inputs: &BTreeMap<String, ScalarValue>,
     fuel: Option<usize>,
 ) -> Result<ControlRunResult, RunError> {
+    for (name, value) in inputs {
+        validate_runtime_value(value)
+            .map_err(|e| RunError(format!("invalid input `{name}`: {}", e.0)))?;
+    }
     let mut values = inputs.clone();
     let mut events = Vec::new();
     execute_graph(graph, &mut values, &mut events, fuel)?;
     Ok(ControlRunResult { values, events })
+}
+
+fn validate_runtime_value(value: &ScalarValue) -> Result<(), RunError> {
+    match value {
+        ScalarValue::Float(value) if !value.is_finite() => {
+            Err(RunError("non-finite float values are unsupported".into()))
+        }
+        ScalarValue::List(items) => {
+            for item in items {
+                validate_runtime_value(item)?;
+            }
+            Ok(())
+        }
+        ScalarValue::Structured(fields) => {
+            for value in fields.values() {
+                validate_runtime_value(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn execute_graph(
@@ -1255,6 +1284,12 @@ fn eval_expr(
             if let Ok(v) = value.parse::<i64>() {
                 return Ok(ScalarValue::Int(v));
             }
+            if let Ok(v) = value.parse::<f64>() {
+                if v.is_finite() {
+                    return Ok(ScalarValue::Float(v));
+                }
+                return Err(RunError("non-finite float literal is unsupported".into()));
+            }
             if value == "null" {
                 return Err(RunError(
                     "null is outside the scalar interpreter subset".into(),
@@ -1269,7 +1304,66 @@ fn eval_expr(
         ExprKind::Current => current
             .cloned()
             .ok_or_else(|| RunError("`.` is only supported inside a fold expression".into())),
-        ExprKind::Condition(value) => eval_expr(value, values, current),
+        ExprKind::Condition(value) => match eval_expr(value, values, current)? {
+            ScalarValue::Bool(value) => Ok(ScalarValue::Bool(value)),
+            other => Err(RunError(format!(
+                "condition capture requires bool, got {}",
+                value_kind(&other)
+            ))),
+        },
+        ExprKind::List(items) => Ok(ScalarValue::List(
+            items
+                .iter()
+                .map(|item| eval_expr(item, values, current))
+                .collect::<Result<_, _>>()?,
+        )),
+        ExprKind::Structured(fields) => {
+            let mut value = BTreeMap::new();
+            for field in fields {
+                let field_value = field.value.as_ref().ok_or_else(|| {
+                    RunError(format!("structured field `{}` has no value", field.name))
+                })?;
+                value.insert(field.name.clone(), eval_expr(field_value, values, current)?);
+            }
+            Ok(ScalarValue::Structured(value))
+        }
+        ExprKind::Field { base, name } => match eval_expr(base, values, current)? {
+            ScalarValue::Structured(fields) => fields
+                .get(name)
+                .cloned()
+                .ok_or_else(|| RunError(format!("structured value has no field `{name}`"))),
+            other => Err(RunError(format!(
+                "cannot select field `{name}` from {}",
+                value_kind(&other)
+            ))),
+        },
+        ExprKind::Index { base, indices } => {
+            if indices.len() != 1 {
+                return Err(RunError("list indexing requires exactly one index".into()));
+            }
+            let index = match eval_expr(&indices[0], values, current)? {
+                ScalarValue::Int(index) if index >= 0 => usize::try_from(index)
+                    .map_err(|_| RunError("list index is too large".into()))?,
+                ScalarValue::Int(_) => {
+                    return Err(RunError("list index cannot be negative".into()))
+                }
+                other => {
+                    return Err(RunError(format!(
+                        "list index must be int, got {}",
+                        value_kind(&other)
+                    )))
+                }
+            };
+            match eval_expr(base, values, current)? {
+                ScalarValue::List(items) => items.get(index).cloned().ok_or_else(|| {
+                    RunError(format!(
+                        "list index {index} is out of bounds (length {})",
+                        items.len()
+                    ))
+                }),
+                other => Err(RunError(format!("cannot index {}", value_kind(&other)))),
+            }
+        }
         ExprKind::Unary { op, value } => {
             let value = eval_expr(value, values, current)?;
             match (op.as_str(), value) {
@@ -1278,6 +1372,7 @@ fn eval_expr(
                     .checked_neg()
                     .map(ScalarValue::Int)
                     .ok_or_else(|| RunError("integer overflow".into())),
+                ("-", ScalarValue::Float(v)) => finite_float(-v),
                 _ => Err(RunError(format!(
                     "unsupported unary operation `{op}` for this scalar value"
                 ))),
@@ -1286,6 +1381,26 @@ fn eval_expr(
         ExprKind::Binary { op, left, right } => {
             let left = eval_expr(left, values, current)?;
             let right = eval_expr(right, values, current)?;
+            if let (Some(a), Some(b)) = (as_float(&left), as_float(&right)) {
+                if matches!(left, ScalarValue::Float(_)) || matches!(right, ScalarValue::Float(_)) {
+                    return match op.as_str() {
+                        "+" => finite_float(a + b),
+                        "-" => finite_float(a - b),
+                        "*" => finite_float(a * b),
+                        "/" if b == 0.0 => Err(RunError("division by zero".into())),
+                        "/" => finite_float(a / b),
+                        "%" if b == 0.0 => Err(RunError("division by zero".into())),
+                        "%" => finite_float(a % b),
+                        "==" => Ok(ScalarValue::Bool(a == b)),
+                        "!=" => Ok(ScalarValue::Bool(a != b)),
+                        "<" => Ok(ScalarValue::Bool(a < b)),
+                        "<=" => Ok(ScalarValue::Bool(a <= b)),
+                        ">" => Ok(ScalarValue::Bool(a > b)),
+                        ">=" => Ok(ScalarValue::Bool(a >= b)),
+                        _ => Err(RunError(format!("unsupported numeric operator `{op}`"))),
+                    };
+                }
+            }
             match (op.as_str(), left, right) {
                 ("+", ScalarValue::Int(a), ScalarValue::Int(b)) => a
                     .checked_add(b)
@@ -1303,14 +1418,39 @@ fn eval_expr(
                 | ("%", ScalarValue::Int(_), ScalarValue::Int(0)) => {
                     Err(RunError("division by zero".into()))
                 }
-                ("/", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Int(a / b)),
-                ("%", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Int(a % b)),
+                ("/", ScalarValue::Int(a), ScalarValue::Int(b)) => a
+                    .checked_div(b)
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer division overflow".into())),
+                ("%", ScalarValue::Int(a), ScalarValue::Int(b)) => a
+                    .checked_rem(b)
+                    .map(ScalarValue::Int)
+                    .ok_or_else(|| RunError("integer remainder overflow".into())),
+                ("+", ScalarValue::Float(a), ScalarValue::Float(b)) => finite_float(a + b),
+                ("-", ScalarValue::Float(a), ScalarValue::Float(b)) => finite_float(a - b),
+                ("*", ScalarValue::Float(a), ScalarValue::Float(b)) => finite_float(a * b),
+                ("/", ScalarValue::Float(_), ScalarValue::Float(b)) if b == 0.0 => {
+                    Err(RunError("division by zero".into()))
+                }
+                ("/", ScalarValue::Float(a), ScalarValue::Float(b)) => finite_float(a / b),
+                ("%", ScalarValue::Float(_), ScalarValue::Float(b)) if b == 0.0 => {
+                    Err(RunError("division by zero".into()))
+                }
+                ("%", ScalarValue::Float(a), ScalarValue::Float(b)) => finite_float(a % b),
                 ("==", a, b) => Ok(ScalarValue::Bool(a == b)),
                 ("!=", a, b) => Ok(ScalarValue::Bool(a != b)),
                 ("<", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a < b)),
                 ("<=", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a <= b)),
                 (">", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a > b)),
                 (">=", ScalarValue::Int(a), ScalarValue::Int(b)) => Ok(ScalarValue::Bool(a >= b)),
+                ("<", ScalarValue::Float(a), ScalarValue::Float(b)) => Ok(ScalarValue::Bool(a < b)),
+                ("<=", ScalarValue::Float(a), ScalarValue::Float(b)) => {
+                    Ok(ScalarValue::Bool(a <= b))
+                }
+                (">", ScalarValue::Float(a), ScalarValue::Float(b)) => Ok(ScalarValue::Bool(a > b)),
+                (">=", ScalarValue::Float(a), ScalarValue::Float(b)) => {
+                    Ok(ScalarValue::Bool(a >= b))
+                }
                 ("and", ScalarValue::Bool(a), ScalarValue::Bool(b)) => {
                     Ok(ScalarValue::Bool(a && b))
                 }
@@ -1321,6 +1461,34 @@ fn eval_expr(
         _ => Err(RunError(
             "expression is outside the scalar interpreter subset".into(),
         )),
+    }
+}
+
+fn finite_float(value: f64) -> Result<ScalarValue, RunError> {
+    if value.is_finite() {
+        Ok(ScalarValue::Float(value))
+    } else {
+        Err(RunError("floating-point result is not finite".into()))
+    }
+}
+
+fn as_float(value: &ScalarValue) -> Option<f64> {
+    match value {
+        // Avoid silently rounding wide integers during mixed float operations.
+        ScalarValue::Int(value) if value.unsigned_abs() <= (1u64 << 53) => Some(*value as f64),
+        ScalarValue::Float(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn value_kind(value: &ScalarValue) -> &'static str {
+    match value {
+        ScalarValue::Bool(_) => "bool",
+        ScalarValue::Int(_) => "int",
+        ScalarValue::Float(_) => "float",
+        ScalarValue::String(_) => "string",
+        ScalarValue::List(_) => "list",
+        ScalarValue::Structured(_) => "structured",
     }
 }
 
@@ -1731,6 +1899,79 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("exhausted fuel 2")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scalar_interpreter_supports_float_fold_and_comparison() {
+        let root = std::env::temp_dir().join(format!("ufp-control-float-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ufp"),
+            "procedure main() { let result = 0.5 run(. + 0.25 until (condition(. >= 1.0))); }",
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("main.ufp")).unwrap();
+        let result =
+            execute_control_graph(&graph.ir.modules[0].graph, &BTreeMap::new(), None).unwrap();
+        assert_eq!(result.values["result"], ScalarValue::Float(1.0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scalar_interpreter_reads_list_indices_and_structured_fields() {
+        let root =
+            std::env::temp_dir().join(format!("ufp-control-collections-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ufp"),
+            "procedure main(input int marker) { let count = record.count; let item = values[1]; }",
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("main.ufp")).unwrap();
+        let inputs = BTreeMap::from([
+            ("marker".into(), ScalarValue::Int(0)),
+            (
+                "record".into(),
+                ScalarValue::Structured(BTreeMap::from([("count".into(), ScalarValue::Int(7))])),
+            ),
+            (
+                "values".into(),
+                ScalarValue::List(vec![ScalarValue::Int(3), ScalarValue::Float(4.5)]),
+            ),
+        ]);
+        let result = execute_control_graph(&graph.ir.modules[0].graph, &inputs, None).unwrap();
+        assert_eq!(result.values["count"], ScalarValue::Int(7));
+        assert_eq!(result.values["item"], ScalarValue::Float(4.5));
+        assert!(eval_source("values[8]", &inputs, None)
+            .unwrap_err()
+            .0
+            .contains("out of bounds"));
+        assert!(eval_source("record.missing", &inputs, None)
+            .unwrap_err()
+            .0
+            .contains("has no field"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn condition_capture_requires_a_boolean_value() {
+        let root =
+            std::env::temp_dir().join(format!("ufp-control-condition-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ufp"),
+            "procedure main(input int count) { if (condition(count)) { } }",
+        )
+        .unwrap();
+        let graph = resolve_module_graph(&root, Path::new("main.ufp")).unwrap();
+        let inputs = BTreeMap::from([("count".into(), ScalarValue::Int(1))]);
+        assert!(
+            execute_control_graph(&graph.ir.modules[0].graph, &inputs, None)
+                .unwrap_err()
+                .0
+                .contains("condition capture requires bool")
         );
         std::fs::remove_dir_all(root).unwrap();
     }
