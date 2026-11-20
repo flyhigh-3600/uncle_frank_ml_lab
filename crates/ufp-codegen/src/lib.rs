@@ -181,13 +181,22 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
     }
     let (body, output, label) = parse_procedure(procedures[0], &matrices)?;
     let mut c = String::from(
-        "#include <stdio.h>\n#include <ggml.h>\n#include <ggml-backend.h>\n#include <ggml-alloc.h>\n#include <ggml-cpu.h>\nint main(void) {\n  struct ggml_init_params p = {.mem_size=64*1024*1024, .mem_buffer=NULL, .no_alloc=true};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n",
+        "#include <stdio.h>\n#include <stddef.h>\n#include <ggml.h>\n#include <ggml-backend.h>\n#include <ggml-alloc.h>\n#include <ggml-cpu.h>\n",
     );
     for (i, matrix) in matrices.iter().enumerate() {
-        let slot = i;
         c.push_str(&format!(
-            "  const float data_{i}[] = {{{}}};\n  struct ggml_tensor *t_{slot}=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n",
-            c_values(&matrix.values), matrix.cols, matrix.rows
+            "static const float data_{i}[] = {{{}}};\n",
+            c_values(&matrix.values)
+        ));
+    }
+    c.push_str(&format!(
+        "#ifdef __cplusplus\nextern \"C\" {{\n#endif\nint ufp_execute(float *output, size_t output_len) {{\n  if (!output || output_len != {}) return 1;\n  struct ggml_init_params p = {{.mem_size=64*1024*1024, .mem_buffer=NULL, .no_alloc=true}};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n",
+        output.shape.rows * output.shape.cols
+    ));
+    for (i, matrix) in matrices.iter().enumerate() {
+        c.push_str(&format!(
+            "  struct ggml_tensor *t_{i}=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n",
+            matrix.cols, matrix.rows
         ));
     }
     c.push_str(&body);
@@ -201,8 +210,14 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
         ));
     }
     c.push_str(&format!(
-        "  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); return 1; }}\n  float result[{}]; ggml_backend_tensor_get(t_{},result,0,sizeof(result));\n  printf(\"{}:\"); for(size_t i=0;i<{};++i) printf(\" %.6g\",result[i]); puts(\"\");\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n",
-        output.shape.rows * output.shape.cols, output.slot, label, output.shape.rows * output.shape.cols
+        "  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); ggml_backend_free(be); ggml_free(ctx); return 1; }}\n  ggml_backend_tensor_get(t_{},output,0,output_len*sizeof(float));\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n#ifdef __cplusplus\n}}\n#endif\n#ifndef UFP_NO_MAIN\nint main(void) {{\n  float result[{}]; if(ufp_execute(result,{})) return 1;\n  printf(\"{}: [\"); for(size_t r=0;r<{};++r) {{ if(r) printf(\", \"); printf(\"[\"); for(size_t col=0;col<{};++col) {{ if(col) printf(\", \"); printf(\"%.6g\",result[r*{}+col]); }} printf(\"]\"); }} puts(\"]\"); return 0;\n}}\n#endif\n",
+        output.slot,
+        output.shape.rows * output.shape.cols,
+        output.shape.rows * output.shape.cols,
+        label,
+        output.shape.rows,
+        output.shape.cols,
+        output.shape.cols
     ));
     Ok(c)
 }
@@ -540,6 +555,7 @@ mod tests {
         assert!(c.contains("ggml_mul_mat"));
         assert!(c.contains("const float data_0[] = {1.000000000f"));
         assert!(c.contains("out:"));
+        assert!(c.contains("int ufp_execute(float *output, size_t output_len)"));
     }
 
     #[test]
