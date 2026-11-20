@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ufp_syntax::{Endpoint, Item, Plan};
 
+pub mod loaders;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
     RunStarted,
