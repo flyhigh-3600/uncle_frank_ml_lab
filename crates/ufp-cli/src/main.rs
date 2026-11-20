@@ -59,11 +59,12 @@ fn compile(path: &str, source: &str, mut args: impl Iterator<Item = String>) -> 
     // Matrix programs use the deliberately narrow typed-AST ggml path. Keep
     // the existing shallow text-plan parser/emitter as the default path.
     if let Ok(ast) = ufp_syntax::parse_ast(source) {
-        if ast
-            .declarations
-            .iter()
-            .any(|n| n.kind == ufp_syntax::SyntaxKind::Matrix)
-        {
+        if ast.declarations.iter().any(|n| {
+            matches!(
+                n.kind,
+                ufp_syntax::SyntaxKind::Matrix | ufp_syntax::SyntaxKind::Procedure
+            )
+        }) {
             let ggml_source = env::var_os("UFP_GGML_SOURCE_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("third_party/ggml"));

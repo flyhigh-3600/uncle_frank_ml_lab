@@ -322,9 +322,10 @@ fn parse_matrix(node: &SyntaxNode) -> Result<Matrix, String> {
     else {
         return Err("matrix declarations require rank, dimensions, and element type".into());
     };
-    if rank != "2" || !is_f32(element) {
+    if rank != "2" {
         return Err("only rank-2 `matrix<2>[rows,cols] of float<32>` is supported".into());
     }
+    require_f32(element)?;
     if dimensions.len() != 2 {
         return Err("matrix must have exactly two dimensions".into());
     }
@@ -598,9 +599,10 @@ fn shape_from_type(ty: &TypeAst) -> Result<Shape, String> {
     else {
         return Err("procedure pins must use `matrix<2>[rows,cols] of float<32>`".into());
     };
-    if rank != "2" || !is_f32(element) || dimensions.len() != 2 {
+    if rank != "2" || dimensions.len() != 2 {
         return Err("procedure pins support only rank-2 `float<32>` matrices".into());
     }
+    require_f32(element)?;
     let rows = dimensions[0]
         .parse::<usize>()
         .map_err(|_| "procedure pin dimensions must be positive integer literals")?;
@@ -623,9 +625,10 @@ fn check_declared_shape(ty: &TypeAst, shape: Shape) -> Result<(), String> {
     else {
         return Err("typed let bindings must use `matrix<2>[rows,cols] of float<32>`".into());
     };
-    if rank != "2" || !is_f32(element) {
+    if rank != "2" {
         return Err("typed let bindings support only rank-2 float<32> matrices".into());
     }
+    require_f32(element)?;
     if dimensions.len() != 2
         || dimensions[0].parse::<usize>().ok() != Some(shape.rows)
         || dimensions[1].parse::<usize>().ok() != Some(shape.cols)
@@ -637,6 +640,16 @@ fn check_declared_shape(ty: &TypeAst, shape: Shape) -> Result<(), String> {
 
 fn is_f32(ty: &TypeAst) -> bool {
     matches!(ty, TypeAst::Sized { name, bits: Some(bits), format: None } if name == "float" && bits == "32")
+}
+
+fn require_f32(ty: &TypeAst) -> Result<(), String> {
+    if is_f32(ty) {
+        return Ok(());
+    }
+    if matches!(ty, TypeAst::Sized { name, .. } if name == "quant") {
+        return Err("quantized matrices are not yet supported: the runtime loader does not provide packed weight bytes and a ggml quant-type mapping".into());
+    }
+    Err("only `float<32>` matrix elements are supported by this ggml codegen path".into())
 }
 
 fn emit_expr(
@@ -822,5 +835,19 @@ mod tests {
         assert!(emit_ggml_matmul_ufp(&wrong_output)
             .unwrap_err()
             .contains("output pin"));
+    }
+
+    #[test]
+    fn quantized_weights_fail_with_loader_limitation() {
+        let source = include_str!("../../../examples/ggml_quant_unsupported.ufp");
+        assert!(emit_ggml_matmul_ufp(source)
+            .unwrap_err()
+            .contains("packed weight bytes"));
+
+        let quantized_input = include_str!("../../../examples/ggml_input_abi.ufp")
+            .replace("float<32> x", "quant<q4_0> x");
+        assert!(emit_ggml_matmul_ufp(&quantized_input)
+            .unwrap_err()
+            .contains("packed weight bytes"));
     }
 }

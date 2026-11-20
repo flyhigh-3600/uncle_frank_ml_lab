@@ -110,3 +110,17 @@ c++ "$build_dir/ggml-input-abi.o" "$build_dir/input-abi-smoke.o" \
   -Wl,-rpath,"$build_dir/src" -Wl,-rpath,"$build_dir/src/ggml-cpu" \
   -lggml -lggml-cpu -lggml-base -lm -o "$build_dir/input-abi-smoke"
 "$build_dir/input-abi-smoke"
+
+if UFP_GGML_SOURCE_DIR="$root/third_party/ggml" UFP_GGML_BUILD_DIR="$build_dir" \
+  cargo run --manifest-path "$root/Cargo.toml" -q -p ufp-cli -- \
+  compile "$root/examples/ggml_quant_unsupported.ufp" "$build_dir/quant-should-not-compile" \
+  2>"$build_dir/quant-error.txt"; then
+  echo "quantized fixture unexpectedly compiled" >&2
+  exit 1
+fi
+if ! grep -q "quantized matrices are not yet supported" "$build_dir/quant-error.txt"; then
+  cat "$build_dir/quant-error.txt" >&2
+  echo "quantized fixture did not produce the expected diagnostic" >&2
+  exit 1
+fi
+echo "quantized weight rejection: ok"
