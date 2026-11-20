@@ -509,6 +509,8 @@ pub struct SyntaxNode {
     pub expression: Option<Expr>,
     pub type_ast: Option<TypeAst>,
     pub annotation_ast: Option<AnnotationAst>,
+    pub import_ast: Option<ImportAst>,
+    pub constraints: Vec<Expr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -632,10 +634,18 @@ pub enum TypeAst {
     Matrix {
         rank: Option<String>,
         dimensions: Vec<String>,
+        dimension_exprs: Vec<Expr>,
         element: Option<Box<TypeAst>>,
     },
     Structured(Vec<(Box<TypeAst>, String)>),
     Condition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportAst {
+    pub path: Vec<String>,
+    pub from: Option<String>,
+    pub alias: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -765,6 +775,16 @@ pub struct AstPlan {
 /// concrete (operators/delimiters are retained as token nodes) to preserve
 /// syntax details such as scope-dot depth and port-map chains.
 pub fn parse_ast(source: &str) -> Result<AstPlan, Vec<Diagnostic>> {
+    let (ast, errors) = parse_ast_recovering(source);
+    if errors.is_empty() {
+        Ok(ast)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Parse while retaining declarations recovered after syntax errors.
+pub fn parse_ast_recovering(source: &str) -> (AstPlan, Vec<Diagnostic>) {
     let (tokens, mut errors) = lex(source);
     let mut parser = AstParser {
         tokens: &tokens,
@@ -784,11 +804,7 @@ pub fn parse_ast(source: &str) -> Result<AstPlan, Vec<Diagnostic>> {
         }
     }
     errors.extend(parser.errors);
-    if errors.is_empty() {
-        Ok(AstPlan { declarations })
-    } else {
-        Err(errors)
-    }
+    (AstPlan { declarations }, errors)
 }
 
 struct AstParser<'a> {
@@ -948,7 +964,7 @@ impl<'a> AstParser<'a> {
             let prec = match op {
                 "or" => 1,
                 "and" => 2,
-                "==" | "!=" | "<" | "<=" | ">" | ">=" => 3,
+                "==" | "!=" | "=" | "<" | "<=" | ">" | ">=" => 3,
                 "+" | "-" => 4,
                 "*" | ".*" | "/" | "%" => 5,
                 "->" => 0,
@@ -1049,7 +1065,7 @@ impl<'a> AstParser<'a> {
                     }
                     continue;
                 }
-                let typed = [
+                let builtin_typed = [
                     "bool",
                     "int",
                     "float",
@@ -1066,6 +1082,13 @@ impl<'a> AstParser<'a> {
                     "auto",
                 ]
                 .contains(&self.tok().text.as_str());
+                let custom_typed = self.tok().kind == TokenKind::Ident
+                    && self.tokens[self.at..]
+                        .iter()
+                        .take_while(|t| t.text != "=" && t.text != "," && t.text != "}")
+                        .skip(1)
+                        .any(|t| t.kind == TokenKind::Ident);
+                let typed = builtin_typed || custom_typed;
                 let ty = if typed { Some(self.type_ast()) } else { None };
                 let name = self.take().text;
                 let value = if self.is("=") {
@@ -1216,8 +1239,16 @@ impl<'a> AstParser<'a> {
                 };
                 self.expect("[");
                 let mut dimensions = Vec::new();
+                let mut dimension_exprs = Vec::new();
                 while !self.eof() && !self.is("]") {
-                    dimensions.push(self.take().text);
+                    let start = self.at;
+                    let dimension = self.expr(0);
+                    let raw = self.tokens[start..self.at]
+                        .iter()
+                        .map(|token| token.text.as_str())
+                        .collect::<String>();
+                    dimensions.push(raw);
+                    dimension_exprs.push(dimension);
                     if self.is(",") {
                         self.take();
                     } else {
@@ -1234,6 +1265,7 @@ impl<'a> AstParser<'a> {
                 TypeAst::Matrix {
                     rank,
                     dimensions,
+                    dimension_exprs,
                     element,
                 }
             }
@@ -1259,7 +1291,20 @@ impl<'a> AstParser<'a> {
                 }
                 TypeAst::Condition
             }
-            _ => TypeAst::Named(name),
+            _ => {
+                let mut qualified = name;
+                while self.is(".") {
+                    self.take();
+                    if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                        qualified.push('.');
+                        qualified.push_str(&self.take().text);
+                    } else {
+                        self.error("UFP2001", "expected type path component");
+                        break;
+                    }
+                }
+                TypeAst::Named(qualified)
+            }
         }
     }
     fn expect(&mut self, text: &str) -> Token {
@@ -1280,6 +1325,8 @@ impl<'a> AstParser<'a> {
             expression: None,
             type_ast: None,
             annotation_ast: None,
+            import_ast: None,
+            constraints: vec![],
         }
     }
     fn node(
@@ -1301,6 +1348,8 @@ impl<'a> AstParser<'a> {
             expression: None,
             type_ast: None,
             annotation_ast: None,
+            import_ast: None,
+            constraints: vec![],
         }
     }
     fn declaration(&mut self) -> Option<SyntaxNode> {
@@ -1329,6 +1378,7 @@ impl<'a> AstParser<'a> {
         let mut children = annotations;
         let mut declaration_expr = None;
         let mut declaration_type = None;
+        let mut import_ast = None;
         if kind == SyntaxKind::Procedure {
             children.extend(self.procedure());
         } else if kind == SyntaxKind::Node {
@@ -1378,6 +1428,55 @@ impl<'a> AstParser<'a> {
                 children.push(self.leaf(SyntaxKind::Identifier));
             }
             self.expect(";");
+        } else if kind == SyntaxKind::Output {
+            self.take();
+            if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                children.push(self.leaf(SyntaxKind::Identifier));
+            } else {
+                self.error("UFP2001", "expected output name");
+            }
+            self.expect(";");
+        } else if kind == SyntaxKind::Import {
+            self.take();
+            let mut path = Vec::new();
+            if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                path.push(self.take().text);
+                while self.is(".") {
+                    self.take();
+                    if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                        path.push(self.take().text);
+                    } else {
+                        self.error("UFP2001", "expected path component after `.`");
+                        break;
+                    }
+                }
+            } else {
+                self.error("UFP2001", "expected import path");
+            }
+            let from = if self.is("from") {
+                self.take();
+                if self.tok().kind == TokenKind::String {
+                    Some(self.take().text)
+                } else {
+                    self.error("UFP2001", "expected import source string");
+                    None
+                }
+            } else {
+                None
+            };
+            let alias = if self.is("as") {
+                self.take();
+                if matches!(self.tok().kind, TokenKind::Ident | TokenKind::Keyword) {
+                    Some(self.take().text)
+                } else {
+                    self.error("UFP2001", "expected import alias");
+                    None
+                }
+            } else {
+                None
+            };
+            self.expect(";");
+            import_ast = Some(ImportAst { path, from, alias });
         } else {
             children.extend(self.until_semicolon());
         }
@@ -1385,6 +1484,7 @@ impl<'a> AstParser<'a> {
         let mut result = Self::node(kind, &start, &last, children);
         result.expression = declaration_expr;
         result.type_ast = declaration_type;
+        result.import_ast = import_ast;
         Some(result)
     }
     fn annotation(&mut self) -> SyntaxNode {
@@ -1535,14 +1635,19 @@ impl<'a> AstParser<'a> {
                 if self.tok().kind == TokenKind::Ident {
                     pin_node.children.push(self.leaf(SyntaxKind::Identifier));
                 }
-                while !self.eof() && !self.is(",") && !self.is(")") {
-                    if self.is("with") {
-                        pin_node.children.push(self.leaf(SyntaxKind::Operator));
-                    } else if self.is("(") || self.is("[") || self.is("{") {
-                        pin_node.children.extend(self.group());
-                    } else {
-                        pin_node.children.push(self.leaf(SyntaxKind::Constraint));
+                if self.is("with") {
+                    self.take();
+                    loop {
+                        let before = self.at;
+                        pin_node.constraints.push(self.expr(0));
+                        if self.at == before || !self.is("and") {
+                            break;
+                        }
                     }
+                }
+                while !self.eof() && !self.is(",") && !self.is(")") {
+                    self.error("UFP2002", "unexpected token in pin declaration");
+                    self.recover_pin();
                 }
                 let last = self.tokens[self.at.saturating_sub(1)].clone();
                 pin_node.span.end = last.span.end;
@@ -1709,6 +1814,8 @@ impl<'a> AstParser<'a> {
                     expression: Some(lhs),
                     type_ast: None,
                     annotation_ast: None,
+                    import_ast: None,
+                    constraints: vec![],
                 });
             } else {
                 expr = Some(lhs);
@@ -1774,8 +1881,22 @@ impl<'a> AstParser<'a> {
         node.expression = Some(value);
         vec![node]
     }
+    fn recover_pin(&mut self) {
+        while !self.eof() && !self.is(",") && !self.is(")") {
+            self.take();
+        }
+    }
     fn recover(&mut self) {
-        while !self.eof() && !self.is(";") && !self.is("}") {
+        let mut depth = 0usize;
+        while !self.eof() {
+            if depth == 0 && (self.is(";") || self.is("}")) {
+                break;
+            }
+            match self.tok().text.as_str() {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             self.take();
         }
         if self.is(";") {
@@ -2078,6 +2199,7 @@ mod tests {
             include_str!("../../../examples/quantized.ufp"),
             include_str!("../../../examples/structured.ufp"),
             include_str!("../../../examples/text_io.ufp"),
+            include_str!("../../../examples/layers/layer_000.ufp"),
         ];
         for (i, source) in examples.iter().enumerate() {
             parse_ast(source).unwrap_or_else(|errors| panic!("example {i}: {errors:#?}"));
@@ -2189,6 +2311,69 @@ mod tests {
     }
 
     #[test]
+    fn imports_outputs_constraints_and_expression_dimensions_are_structured() {
+        let ast = parse_ast("import pkg.sub from \"lib.ufp\" as local; output result; procedure f(input matrix<2>[n+1, width*2] x with x.shape = y.shape and x.rank = 2) { return x; }").unwrap();
+        let import = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Import)
+            .unwrap();
+        let import = import.import_ast.as_ref().unwrap();
+        assert_eq!(import.path, ["pkg", "sub"]);
+        assert_eq!(import.from.as_deref(), Some("lib.ufp"));
+        assert_eq!(import.alias.as_deref(), Some("local"));
+        let output = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Output)
+            .unwrap();
+        assert!(output
+            .children
+            .iter()
+            .any(|n| n.token.as_ref().is_some_and(|t| t.text == "result")));
+        let procedure = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Procedure)
+            .unwrap();
+        let pin = procedure
+            .children
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Pin)
+            .unwrap();
+        assert_eq!(pin.constraints.len(), 1);
+        let TypeAst::Matrix {
+            dimension_exprs, ..
+        } = pin.type_ast.as_ref().unwrap()
+        else {
+            panic!("expected matrix type")
+        };
+        assert_eq!(dimension_exprs.len(), 2);
+    }
+
+    #[test]
+    fn nested_structured_custom_fields_and_error_recovery_are_stable() {
+        let e = parse_expression("structured { My.Record item = null, scalar = 1 }").unwrap();
+        let ExprKind::Structured(fields) = e.kind else {
+            panic!("expected structured literal")
+        };
+        assert!(matches!(fields[0].ty, Some(TypeAst::Named(ref n)) if n == "My.Record"));
+        let bad = "procedure broken(input matrix<2>[3,] x) { let a = structured { int n = ; } } output recovered;";
+        let first = parse_ast(bad).unwrap_err();
+        let second = parse_ast(bad).unwrap_err();
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        assert!(first.iter().all(|d| d.span.start <= d.span.end));
+        let (recovered, diagnostics) = parse_ast_recovering(bad);
+        assert_eq!(diagnostics, first);
+        assert!(recovered
+            .declarations
+            .iter()
+            .any(|n| n.kind == SyntaxKind::Output));
+        assert!(parse_ast("output recovered;").is_ok());
+    }
+
+    #[test]
     fn expression_parser_builds_precedence_and_postfix_trees() {
         let e = parse_expression("a + b * -c == d and ready").unwrap();
         let ExprKind::Binary { op, left, .. } = e.kind else {
@@ -2233,7 +2418,7 @@ mod tests {
     #[test]
     fn parses_type_shapes_and_annotation_zones() {
         assert!(
-            matches!(parse_type("matrix<2>[128,256] of quant<q4_0>").unwrap(), TypeAst::Matrix { rank: Some(_), dimensions, element: Some(_) } if dimensions.len() == 2)
+            matches!(parse_type("matrix<2>[128,256] of quant<q4_0>").unwrap(), TypeAst::Matrix { rank: Some(_), dimensions, element: Some(_), .. } if dimensions.len() == 2)
         );
         assert!(
             matches!(parse_type("structured { int count, list<string> names }").unwrap(), TypeAst::Structured(fields) if fields.len() == 2)
