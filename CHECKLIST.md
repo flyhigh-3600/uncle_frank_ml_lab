@@ -62,7 +62,7 @@ nothing else is wired yet.
 ## E2 — Types & constraints
 
 - [ ] **UF-201** type model — all §3.1 types, interning, canonical printing; `matrix<r>` = rank, `of` = element (D-006); `float<n>`, `bfloat<16>`, `quant<fmt>` (D-009)
-- [ ] **UF-202** scopes & symbols — shadowing rules documented and tested
+- [ ] **UF-202** scopes & symbols — `.`/`..`/`...` outer-scope walking (D-011), readonly; shadowing rules documented and tested
 - [ ] **UF-203** expression typing
   - [ ] index arity = rank; bounds provable → static, else runtime check
   - [ ] dot access works for `structured` and `sheet`
@@ -138,7 +138,7 @@ nothing else is wired yet.
 ## E7 — ML utilities & examples
 
 - [ ] **UF-701** builtin registry with typed pins + capabilities
-- [ ] **UF-702** `import_gguf` — metadata, tensor handles, dtype mapping
+- [ ] **UF-702** `import_gguf` — nested `structured` (metadata + matrix substructures), per-file type specialisation, dtype mapping
 - [ ] **UF-703** `condition` combinators + capture checks
 - [ ] **UF-704** example corpus (one plan per feature, all parsed by CI)
 - [ ] **UF-705** end-to-end: GGUF → fold generation → decoded text
@@ -166,6 +166,7 @@ nothing else is wired yet.
 - [x] **Q2** `*` = matmul, `.*` = Hadamard (ggml semantics) → D-007
 - [x] **Q7** `f.(in) g(in)` = Verilog-style port chain → D-008
 - [x] **Precision** — `float<n>`, `bfloat<16>`, `quant<fmt>` → D-009
+- [x] **Q14** — `.` self, `..` parent, `...` grandparent; GGUF is nested `structured` → D-011
 - [x] **`until`** — do-until feedback, pass back only when unmet → D-010
 - [ ] **Q3** `sheet` — typed columns? row mutation?
 - [ ] **Q4** integer representation of atomics; float comparison semantics
@@ -177,7 +178,6 @@ nothing else is wired yet.
 - [ ] **Q11** `.txt` truly inert, or `@doc` attachments?
 - [ ] **Q12** project root entry point
 - [ ] **Q13** `import` vs `portal` — semantic or UX difference?
-- [ ] **Q14** `..` scope — procedure result or caller?
 - [ ] **Q15** is ggml mandatory or optional with a C fallback?
 
 ## Definition of done (every task)

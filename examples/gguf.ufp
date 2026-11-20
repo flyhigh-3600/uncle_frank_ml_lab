@@ -1,0 +1,18 @@
+// gguf.ufp — a loaded GGUF is just nested structure (D-011).
+// No model type, no new type constructors: metadata is a substructure and the
+// matrix set is a heterogeneous list of tensor substructures.
+
+procedure inspect(input string path) {
+    let model = import_gguf(path);
+
+    let block = structured {
+        list matrices = ..model.matrices,          // parent: procedure scope
+
+        structured {
+            string name = ..matrices[0].name,      // parent: block scope
+            auto   w    = ..matrices[0].data       // concrete type from metadata
+        } head
+    };
+
+    probe(block.head.w);
+}

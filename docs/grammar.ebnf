@@ -85,7 +85,7 @@ run_expr        = "run" "(" expr "until" "(" expr ")" ")" ;
 
 primary         = literal
                 | current
-                | origin
+                | scoped_ident
                 | ident
                 | "(" expr ")"
                 | struct_lit
@@ -93,8 +93,15 @@ primary         = literal
                 | matrix_lit
                 | condition_lit ;
 
-current         = "." ;                                  (* fold accumulator *)
-origin          = ".." ;                                 (* enclosing result *)
+current         = "." ;                                  (* bare self / fold accumulator *)
+scoped_ident    = dots ident { field_access | index } ;   (* .f, ..f, ...f *)
+dots            = "." { "." } ;
+
+(* A run of dots at the start of an expression is a scope path: 1 dot = self,
+   2 = parent, 3 = grandparent, and so on (D-011). The lexer consumes the
+   maximal run; the parser chooses `scoped_ident` when the run is followed by an
+   identifier, and `current` when it stands alone. After an expression, a single
+   dot is ordinary field access (postfix). *)
 
 struct_lit      = "structured" "{" [ field_init { "," field_init } ] "}" ;
 field_init      = ( type ident | ident ) [ "=" expr ] ;

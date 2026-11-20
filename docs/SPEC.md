@@ -160,6 +160,22 @@ Shorthand fields (`matrix_var`) adopt an existing binding and its type. Field
 order is irrelevant; duplicate field names are an error. A `structured` value is
 a first-class pipe payload, not a reference.
 
+**Scope walking (decided, D-011).** Every `structured` literal — and every
+procedure body — opens a lexical scope. Dots walk outward, one per level:
+
+```ufp
+.field          // self
+..field         // parent scope
+...field        // grandparent scope
+..matrices[0]   // parent's `matrices`, first substructure
+```
+
+`.` is self, `..` is the immediately enclosing scope, `...` the one outside
+that, and so on. Reads from outer scopes are allowed; writing through `..` is an
+error (use an `inout` pin instead). Resolution is static: the checker rewrites
+each scope path to a concrete binding, so there is no runtime lookup and no
+dynamic scoping.
+
 ### 3.3 Comparison semantics
 
 Comparisons are **element-wise and shape-preserving**:
@@ -257,8 +273,8 @@ Consequences:
 - the body runs **at least once** — this is do-until, not while;
 - the loop-carried back-edge is conditional: tokens are passed back only on the
   unmet branch, which is exactly what the editor draws as a gated self-edge;
-- `.` is the current accumulator; `..` is the enclosing procedure's result
-  (read-only; assigning it is an error);
+- `.` is the current accumulator; `..` / `...` walk to enclosing scopes (§3.2),
+  so a fold body may read outer bindings but never assign them;
 - the compiler inserts a **fuel bound** (default 10 000 iterations, overridable
   with `@fuel(...)`); fuel exhaustion is a runtime error, not silent truncation;
 - statically provable non-termination is a compile error.
@@ -372,6 +388,7 @@ Desugaring rules:
 | `f.(a) g(b)` | outputs of `f` wired into `g`'s leftmost free inputs (Verilog-style ports) |
 | `structured{…}` | `make_struct` + field extraction nodes |
 | indexing | `index` node with checked bounds |
+| `.` / `..` / `...` | static resolution to a binding; no runtime lookup |
 | `Portal` | boundary node; target compiled separately |
 | `@T(...)` | zone metadata on nodes/edges; phase barriers |
 
@@ -452,7 +469,7 @@ class (pure / alloc / io / model). Initial set:
 
 | Builtin | Purpose |
 |---|---|
-| `import_gguf(path)` | load GGUF metadata and tensors as handles |
+| `import_gguf(path)` | load a GGUF as a nested `structured` (metadata + matrix substructures) |
 | `tokenizer.encode/decode` | text ↔ token lists |
 | `matmul`, `transpose`, `reshape`, `softmax`, `layer_norm` | tensor primitives |
 | `probe(value)` | attach an inspector; never alters data |
@@ -461,6 +478,71 @@ class (pure / alloc / io / model). Initial set:
 
 Utilities are implemented in Rust for the interpreter and in C/ggml for native
 builds; both must pass the same conformance vectors (§12).
+
+### 10.1 A loaded GGUF is plain nested structure
+
+No model type and no new type constructors are introduced. `import_gguf` returns
+an ordinary `structured`; metadata is a substructure and the matrix set is a
+heterogeneous `list` of tensor substructures:
+
+```ufp
+let model = import_gguf("qwen3-4b-q4_0.gguf");
+
+// model.metadata.architecture
+// model.matrices[0].name
+// model.matrices[0].data
+```
+
+Canonical layout:
+
+```
+structured {
+  string path,
+  string version,
+  structured {                       // metadata
+    string architecture,
+    int    n_layers,
+    int    n_embd,
+    int    n_heads,
+    int    n_vocab
+  } metadata,
+  list matrices                      // one substructure per tensor
+}
+```
+
+Each entry of `matrices` is itself a `structured`:
+
+```
+structured {
+  string   name,
+  list<int> shape,               // e.g. [4096, 4096]
+  string   dtype,                // ggml format name, e.g. "q4_0"
+  matrix<2>[4096,4096] of quant<q4_0> data   // this tensor's specialised type
+}
+```
+
+Because the GGUF is a compile-time input, the loader **specialises this
+structure from the file's metadata**: the rank `r`, the extents and the element
+type are substituted per tensor, so `model.matrices[3].data` is a concrete
+`matrix<r>[d0, …, d(r-1)] of <elem>` — never a dynamically typed matrix. A
+constant index (`matrices[0]`) sees that specialised type; a non-constant index
+sees only the common fields (`name`, `shape`, `dtype`) and cannot touch `.data`.
+No new type constructor is added; "dynamic" indexing is simply rejected until the
+index is constant.
+
+Inside a structure, the parent's matrix set is reached with `..`:
+
+```ufp
+let block = structured {
+    list matrices = ..model.matrices,        // procedure scope
+    structured {
+        string name = ..matrices[0].name,    // outer structure scope
+        auto   w    = ..matrices[0].data
+    } head
+};
+```
+
+`..matrices[0]` is ordinary scope walking (§3.2), not a GGUF-specific rule.
 
 ---
 
@@ -530,7 +612,7 @@ and termination is a `condition` over the accumulator. The back-edge is gated on
 ## 14. Open questions (Frank must rule)
 
 Resolved: **Q1** → D-006 (matrix rank), **Q2** → D-007 (`*` = matmul, `.*` = Hadamard),
-**Q7** → D-008 (Verilog-style port chains).
+**Q7** → D-008 (Verilog-style port chains), **Q14** → D-011 (scope walking).
 
 - **Q3** `sheet`: dataframe with typed columns? Does it need row mutation?
 - **Q4** "all internal values are integers": are floats bit-cast to ints for
@@ -547,7 +629,6 @@ Resolved: **Q1** → D-006 (matrix rank), **Q2** → D-007 (`*` = matmul, `.*` =
 - **Q12** multiple entry points / multiple plans per project: how is the root
   chosen? (Current: `main` in the file opened in the editor.)
 - **Q13** is `import` distinct from `portal` semantically, or only in UX?
-- **Q14** scope of `..`: enclosing procedure's *return value* or its *caller*?
 - **Q15** must ggml be a hard dependency, or is a pure-C fallback required?
 
 ---

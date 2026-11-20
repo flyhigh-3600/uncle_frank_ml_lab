@@ -12,5 +12,6 @@ decision log settles Q1–Q15.
 | `portal_demo.ufp` | `Portal`, top-level nodes, pipes, `@T` zones |
 | `generate.ufp` | do-until fold (`run … until`), `.`, `..`, `condition` |
 | `quantized.ufp` | `float<16>`, `quant<q4_0>`, matmul vs explicit `dequantize` |
+| `gguf.ufp` | nested `structured` model, `matrices[0]`, `..` scope walking (D-011) |
 
 `.txt` files are inert; see `notes.txt`.

@@ -106,6 +106,22 @@ yields the result. Body runs at least once (do-until), fuel still bounds it.
 tokens are passed back only if the conditions are unmet."
 **Spec:** §4.3
 
+### D-011 — dot-scope walking; GGUF is nested `structured`
+**Status:** decided (Frank clarification; resolves Q14)
+**Decision:**
+- `.` = self, `..` = parent scope, `...` = grandparent, one dot per level;
+  a `structured` literal and a procedure body each open a scope.
+- Outer reads are allowed; assigning through `..` is an error. Resolution is
+  static — no runtime lookup, no dynamic scoping.
+- `import_gguf` returns an ordinary nested `structured`: metadata substructure +
+  heterogeneous `list` of tensor substructures (`name`, `shape`, `dtype`, `data`).
+  No model type, no new type constructors. The loaded type is specialised from
+  the file's metadata, so `matrices[0].data` has a concrete matrix type at a
+  constant index.
+**Rationale:** a GGUF is just a structure with nested substructures; matrices are
+referenced across scopes with dots (e.g. `..matrices[0]`).
+**Spec:** §3.2, §10.1
+
 ---
 
 ## Open
@@ -176,12 +192,6 @@ implicit threading.
 **Leaning:** `import` = compiler builtins; `portal` = another user plan. Different
 namespaces, same pin model.
 **Spec:** §5, §10
-
-### Q14 — scope of `..`
-**Status:** open
-**Options:** enclosing procedure's result vs caller's result.
-**Leaning:** enclosing procedure's result, read-only.
-**Spec:** §4.3
 
 ### Q15 — ggml required?
 **Status:** open

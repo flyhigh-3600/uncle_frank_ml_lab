@@ -48,7 +48,7 @@ as GitHub issues.
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
 | UF-201 | Type model: bool, int\<n\>, float\<n\>, bfloat\<16\>, quant\<fmt\>, string, binary, sheet, list, matrix, structured, condition | L | UF-103 | todo |
-| UF-202 | Scopes, symbol tables, pin/param resolution | M | UF-103 | todo |
+| UF-202 | Scopes, symbol tables, `.`/`..`/`...` scope walking, pin/param resolution | M | UF-103 | todo |
 | UF-203 | Expression typing: indexing, dot access, struct literals, operators | L | UF-201, UF-202 | todo |
 | UF-204 | Comparison semantics: element-wise bool matrix/struct, orderability errors | M | UF-203 | todo |
 | UF-205 | Pin modes: explicit, inferred (`auto`), inout; fixpoint inference | L | UF-203 | todo |
@@ -113,7 +113,7 @@ as GitHub issues.
 | ID | Task | Size | Depends on | Status |
 |---|---|---|---|---|
 | UF-701 | Builtin registry with typed pins and capability classes | M | UF-203 | todo |
-| UF-702 | GGUF import: metadata → types, tensors → handles | L | UF-701, UF-601 | todo |
+| UF-702 | GGUF import → nested `structured` (metadata + matrix substructures), specialised types | L | UF-701, UF-601 | todo |
 | UF-703 | `condition` combinators and capture checks | S | UF-204 | todo |
 | UF-704 | Example corpus: one `.ufp` per feature | M | UF-103 | todo |
 | UF-705 | End-to-end demo: load GGUF, run generation fold, inspect tokens | L | UF-604, UF-702, UF-309 | todo |
