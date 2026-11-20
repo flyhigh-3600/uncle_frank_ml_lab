@@ -6,9 +6,117 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::path::{Path, PathBuf};
 use ufp_syntax::{Endpoint, Item, Plan};
 
 pub mod loaders;
+
+/// A project-local module and its directly declared terminal signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedModule {
+    pub path: PathBuf,
+    pub content_hash: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// Resolve portal files relative to the project root, recursively checking
+/// that the module graph is acyclic. Portal paths are project-relative (not
+/// relative to the importing file).
+pub fn resolve_portals(project_root: &Path, entry: &Path) -> Result<Vec<ResolvedModule>, RunError> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        active: &mut Vec<PathBuf>,
+        done: &mut BTreeSet<PathBuf>,
+        modules: &mut Vec<ResolvedModule>,
+    ) -> Result<(), RunError> {
+        let full = root.join(path);
+        let canonical = full
+            .canonicalize()
+            .map_err(|e| RunError(format!("cannot resolve module `{}`: {e}", path.display())))?;
+        let relative = canonical
+            .strip_prefix(
+                root.canonicalize()
+                    .map_err(|e| RunError(format!("invalid project root: {e}")))?,
+            )
+            .map_err(|_| RunError(format!("module `{}` escapes project root", path.display())))?
+            .to_path_buf();
+        if active.contains(&relative) {
+            let mut chain = active
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>();
+            chain.push(relative.display().to_string());
+            return Err(RunError(format!("portal cycle: {}", chain.join(" -> "))));
+        }
+        if done.contains(&relative) {
+            return Ok(());
+        }
+        let source = std::fs::read_to_string(&canonical)
+            .map_err(|e| RunError(format!("cannot read module `{}`: {e}", relative.display())))?;
+        let plan = ufp_syntax::parse_plan(&source)
+            .map_err(|e| RunError(format!("parse error in `{}`: {}", relative.display(), e[0])))?;
+        active.push(relative.clone());
+        for item in &plan.items {
+            if let Item::Portal { path, .. } = item {
+                visit(root, Path::new(path), active, done, modules)?;
+            }
+        }
+        active.pop();
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in source.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let (mut inputs, mut outputs) = (Vec::new(), Vec::new());
+        for item in &plan.items {
+            match item {
+                Item::Input { name, .. } => inputs.push(name.clone()),
+                Item::Output { name, .. } => outputs.push(name.clone()),
+                _ => {}
+            }
+        }
+        let mut graph = ufp_ir::lower_plan(&plan).map_err(|e| {
+            RunError(format!(
+                "lower error in `{}`: {}",
+                relative.display(),
+                e[0].message
+            ))
+        })?;
+        graph
+            .metadata
+            .insert("module.path".into(), relative.display().to_string());
+        graph
+            .metadata
+            .insert("module.hash".into(), format!("{hash:016x}"));
+        graph
+            .metadata
+            .insert("module.inputs".into(), inputs.join(","));
+        graph
+            .metadata
+            .insert("module.outputs".into(), outputs.join(","));
+        modules.push(ResolvedModule {
+            path: relative.clone(),
+            content_hash: format!("{hash:016x}"),
+            inputs,
+            outputs,
+            metadata: graph.metadata,
+        });
+        done.insert(relative);
+        Ok(())
+    }
+    let mut modules = Vec::new();
+    visit(
+        project_root,
+        entry,
+        &mut Vec::new(),
+        &mut BTreeSet::new(),
+        &mut modules,
+    )?;
+    Ok(modules)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -145,5 +253,39 @@ mod tests {
             result.events.first(),
             Some(RuntimeEvent::RunStarted)
         ));
+    }
+
+    #[test]
+    fn resolves_portal_signature_and_compact_metadata() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("main.ufp"), "portal child = \"child.ufp\";").unwrap();
+        std::fs::write(
+            root.join("child.ufp"),
+            "input prompt = \"x\"; output reply; pipe prompt.text -> reply.text;",
+        )
+        .unwrap();
+        let modules = resolve_portals(&root, Path::new("main.ufp")).unwrap();
+        let child = modules
+            .iter()
+            .find(|m| m.path == Path::new("child.ufp"))
+            .unwrap();
+        assert_eq!(child.inputs, ["prompt"]);
+        assert_eq!(child.outputs, ["reply"]);
+        assert_eq!(child.content_hash.len(), 16);
+        assert_eq!(child.metadata["module.hash"], child.content_hash);
+        assert_eq!(child.metadata["module.inputs"], "prompt");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_portal_cycles() {
+        let root = std::env::temp_dir().join(format!("ufp-portal-cycle-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.ufp"), "portal b = \"b.ufp\";").unwrap();
+        std::fs::write(root.join("b.ufp"), "portal a = \"a.ufp\";").unwrap();
+        let error = resolve_portals(&root, Path::new("a.ufp")).unwrap_err();
+        assert!(error.0.contains("portal cycle"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
