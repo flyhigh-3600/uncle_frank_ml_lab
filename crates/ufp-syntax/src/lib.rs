@@ -116,7 +116,14 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             let width = source[i..].chars().next().map(char::len_utf8).unwrap_or(1);
             i += width;
             column += 1;
-            errors.push(diag("UFP1003", "invalid character", start, i, start_line, start_column));
+            errors.push(diag(
+                "UFP1003",
+                "invalid character",
+                start,
+                i,
+                start_line,
+                start_column,
+            ));
             continue;
         }
         if bytes.get(i..i + 2) == Some(b"//") {
@@ -184,7 +191,14 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     start_line,
                     start_column,
                 ));
-                out.push(token(TokenKind::Error, source[start..i].to_owned(), start, i, start_line, start_column));
+                out.push(token(
+                    TokenKind::Error,
+                    source[start..i].to_owned(),
+                    start,
+                    i,
+                    start_line,
+                    start_column,
+                ));
             }
             continue;
         }
@@ -226,7 +240,14 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     start_line,
                     start_column,
                 ));
-                out.push(token(TokenKind::Error, source[start..i].to_owned(), start, i, start_line, start_column));
+                out.push(token(
+                    TokenKind::Error,
+                    source[start..i].to_owned(),
+                    start,
+                    i,
+                    start_line,
+                    start_column,
+                ));
             }
             continue;
         }
@@ -286,8 +307,22 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             }
             let text = source[start..i].to_owned();
             if malformed_number {
-                errors.push(diag("UFP1004", "malformed numeric literal", start, i, start_line, start_column));
-                out.push(token(TokenKind::Error, text, start, i, start_line, start_column));
+                errors.push(diag(
+                    "UFP1004",
+                    "malformed numeric literal",
+                    start,
+                    i,
+                    start_line,
+                    start_column,
+                ));
+                out.push(token(
+                    TokenKind::Error,
+                    text,
+                    start,
+                    i,
+                    start_line,
+                    start_column,
+                ));
                 continue;
             }
             let kind = if !in_zone_path && text.contains(['.', 'e', 'E']) {
@@ -460,6 +495,397 @@ pub enum Item {
 pub struct Endpoint {
     pub node: String,
     pub port: String,
+}
+
+/// Lossless-enough syntax tree produced by [`parse_ast`]. `SyntaxNode` keeps
+/// delimiters and leaf tokens, so consumers can build typed/lowered IR without
+/// reparsing source text, while retaining exact source locations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyntaxNode {
+    pub kind: SyntaxKind,
+    pub span: Span,
+    pub token: Option<Token>,
+    pub children: Vec<SyntaxNode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntaxKind {
+    Plan,
+    Annotation,
+    Import,
+    Portal,
+    Text,
+    Input,
+    Output,
+    Matrix,
+    Binary,
+    Procedure,
+    Pin,
+    Graph,
+    Node,
+    Pipe,
+    Block,
+    Let,
+    Assign,
+    If,
+    Return,
+    ExpressionStatement,
+    Expression,
+    Type,
+    Constraint,
+    List,
+    Field,
+    Index,
+    Call,
+    PortMap,
+    RunUntil,
+    Scope,
+    Literal,
+    Identifier,
+    Operator,
+    Group,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AstPlan {
+    pub declarations: Vec<SyntaxNode>,
+}
+
+/// Parse the documented UFP syntax into a tree. The tree is intentionally
+/// concrete (operators/delimiters are retained as token nodes) to preserve
+/// syntax details such as scope-dot depth and port-map chains.
+pub fn parse_ast(source: &str) -> Result<AstPlan, Vec<Diagnostic>> {
+    let (tokens, mut errors) = lex(source);
+    let mut parser = AstParser {
+        tokens: &tokens,
+        at: 0,
+        errors: Vec::new(),
+    };
+    let mut declarations = Vec::new();
+    while !parser.eof() {
+        let start = parser.at;
+        let node = parser.declaration();
+        if let Some(node) = node {
+            declarations.push(node);
+        }
+        if parser.at == start {
+            parser.error("UFP2002", "unable to parse declaration; skipping token");
+            parser.at += 1;
+        }
+    }
+    errors.extend(parser.errors);
+    if errors.is_empty() {
+        Ok(AstPlan { declarations })
+    } else {
+        Err(errors)
+    }
+}
+
+struct AstParser<'a> {
+    tokens: &'a [Token],
+    at: usize,
+    errors: Vec<Diagnostic>,
+}
+impl<'a> AstParser<'a> {
+    fn tok(&self) -> &Token {
+        &self.tokens[self.at]
+    }
+    fn eof(&self) -> bool {
+        self.tok().kind == TokenKind::Eof
+    }
+    fn is(&self, s: &str) -> bool {
+        self.tok().text == s
+    }
+    fn take(&mut self) -> Token {
+        let t = self.tok().clone();
+        if !self.eof() {
+            self.at += 1;
+        }
+        t
+    }
+    fn error(&mut self, code: &'static str, message: &str) {
+        self.errors.push(Diagnostic {
+            code,
+            message: message.into(),
+            span: self.tok().span,
+        });
+    }
+    fn expect(&mut self, text: &str) -> Token {
+        if self.is(text) {
+            self.take()
+        } else {
+            self.error("UFP2001", &format!("expected `{text}`"));
+            self.tok().clone()
+        }
+    }
+    fn leaf(&mut self, kind: SyntaxKind) -> SyntaxNode {
+        let t = self.take();
+        SyntaxNode {
+            kind,
+            span: t.span,
+            token: Some(t),
+            children: vec![],
+        }
+    }
+    fn node(
+        kind: SyntaxKind,
+        first: &Token,
+        last: &Token,
+        children: Vec<SyntaxNode>,
+    ) -> SyntaxNode {
+        SyntaxNode {
+            kind,
+            span: Span {
+                start: first.span.start,
+                end: last.span.end,
+                line: first.span.line,
+                column: first.span.column,
+            },
+            token: None,
+            children,
+        }
+    }
+    fn declaration(&mut self) -> Option<SyntaxNode> {
+        let start = self.tok().clone();
+        let mut annotations = Vec::new();
+        while self.is("@") {
+            annotations.push(self.annotation());
+        }
+        let kind = match self.tok().text.as_str() {
+            "import" => SyntaxKind::Import,
+            "portal" => SyntaxKind::Portal,
+            "text" => SyntaxKind::Text,
+            "input" => SyntaxKind::Input,
+            "output" => SyntaxKind::Output,
+            "matrix" => SyntaxKind::Matrix,
+            "binary" => SyntaxKind::Binary,
+            "procedure" => SyntaxKind::Procedure,
+            "node" => SyntaxKind::Node,
+            "pipe" => SyntaxKind::Pipe,
+            _ => {
+                self.error("UFP2002", "expected a top-level declaration");
+                self.recover();
+                return None;
+            }
+        };
+        let mut children = annotations;
+        if kind == SyntaxKind::Procedure {
+            children.extend(self.procedure());
+        } else if kind == SyntaxKind::Node {
+            self.take();
+            children.extend(self.node_decl());
+        } else if kind == SyntaxKind::Pipe {
+            self.take();
+            children.extend(self.pipe_decl());
+        } else {
+            children.extend(self.until_semicolon());
+        }
+        let last = self.tokens[self.at.saturating_sub(1)].clone();
+        Some(Self::node(kind, &start, &last, children))
+    }
+    fn annotation(&mut self) -> SyntaxNode {
+        let first = self.take();
+        let mut children = vec![];
+        if !self.eof() {
+            children.push(self.leaf(SyntaxKind::Identifier));
+        }
+        if self.is("(") {
+            children.extend(self.group());
+        }
+        let last = self.tokens[self.at.saturating_sub(1)].clone();
+        Self::node(SyntaxKind::Annotation, &first, &last, children)
+    }
+    fn until_semicolon(&mut self) -> Vec<SyntaxNode> {
+        let mut v = Vec::new();
+        let mut depth = 0i32;
+        while !self.eof() {
+            if depth == 0 && self.is(";") {
+                v.push(self.leaf(SyntaxKind::Operator));
+                break;
+            }
+            if self.is("(") || self.is("[") || self.is("{") {
+                v.extend(self.group());
+                continue;
+            }
+            let t = self.tok().text.clone();
+            if ["(", "[", "{"].contains(&t.as_str()) {
+                depth += 1;
+            }
+            if [")", "]", "}"].contains(&t.as_str()) {
+                depth -= 1;
+            }
+            v.push(self.leaf(if self.tok().kind == TokenKind::Ident {
+                SyntaxKind::Identifier
+            } else {
+                SyntaxKind::Expression
+            }));
+        }
+        if self.eof()
+            && !v
+                .last()
+                .is_some_and(|x| x.token.as_ref().is_some_and(|t| t.text == ";"))
+        {
+            self.error("UFP2001", "expected `;`");
+        }
+        v
+    }
+    fn group(&mut self) -> Vec<SyntaxNode> {
+        let open = self.take();
+        let close = match open.text.as_str() {
+            "(" => ")",
+            "[" => "]",
+            "{" => "}",
+            _ => ")",
+        };
+        let mut children = Vec::new();
+        while !self.eof() && !self.is(close) {
+            if self.is("(") || self.is("[") || self.is("{") {
+                children.extend(self.group());
+            } else {
+                children.push(self.leaf(if self.tok().kind == TokenKind::Ident {
+                    SyntaxKind::Identifier
+                } else {
+                    SyntaxKind::Expression
+                }));
+            }
+        }
+        if self.is(close) {
+            self.take();
+        } else {
+            self.error("UFP2001", &format!("expected `{close}`"));
+        }
+        children
+    }
+    fn procedure(&mut self) -> Vec<SyntaxNode> {
+        self.take(); // procedure keyword
+        let mut out = vec![self.leaf(SyntaxKind::Identifier)];
+        if self.is("(") {
+            self.take();
+            while !self.eof() && !self.is(")") {
+                let first = self.tok().clone();
+                let mut pin = Vec::new();
+                while !self.eof() && !self.is(",") && !self.is(")") {
+                    if self.is("(") || self.is("[") || self.is("{") {
+                        pin.extend(self.group());
+                    } else {
+                        pin.push(self.leaf(
+                            if ["input", "output", "inout"].contains(&self.tok().text.as_str()) {
+                                SyntaxKind::Operator
+                            } else {
+                                SyntaxKind::Type
+                            },
+                        ));
+                    }
+                }
+                let last = self.tokens[self.at.saturating_sub(1)].clone();
+                out.push(Self::node(SyntaxKind::Pin, &first, &last, pin));
+                if self.is(",") {
+                    self.take();
+                } else {
+                    break;
+                }
+            }
+            self.expect(")");
+        } else {
+            self.error("UFP2001", "expected `(` after procedure name");
+        }
+        if self.is("graph") {
+            out.push(self.leaf(SyntaxKind::Graph));
+        }
+        if self.is("{") {
+            out.push(self.block());
+        } else {
+            self.error("UFP2001", "expected procedure body");
+            self.recover();
+        }
+        out
+    }
+    fn block(&mut self) -> SyntaxNode {
+        let first = self.expect("{");
+        let mut children = Vec::new();
+        while !self.eof() && !self.is("}") {
+            let before = self.at;
+            let kind = match self.tok().text.as_str() {
+                "let" => SyntaxKind::Let,
+                "if" => SyntaxKind::If,
+                "return" => SyntaxKind::Return,
+                "pipe" => SyntaxKind::Pipe,
+                "node" => SyntaxKind::Node,
+                _ => SyntaxKind::ExpressionStatement,
+            };
+            if kind == SyntaxKind::If {
+                let f = self.take();
+                let mut c = Vec::new();
+                if self.is("(") {
+                    c.extend(self.group());
+                } else {
+                    self.error("UFP2001", "expected condition");
+                }
+                if self.is("{") {
+                    c.push(self.block());
+                }
+                while self.is("elif") {
+                    c.push(self.leaf(SyntaxKind::Operator));
+                    if self.is("(") {
+                        c.extend(self.group());
+                    }
+                    if self.is("{") {
+                        c.push(self.block());
+                    }
+                }
+                if self.is("else") {
+                    c.push(self.leaf(SyntaxKind::Operator));
+                    if self.is("{") {
+                        c.push(self.block());
+                    }
+                }
+                let l = self.tokens[self.at.saturating_sub(1)].clone();
+                children.push(Self::node(kind, &f, &l, c));
+            } else if kind == SyntaxKind::Pipe {
+                let f = self.tok().clone();
+                self.take();
+                let c = self.pipe_decl();
+                let l = self.tokens[self.at.saturating_sub(1)].clone();
+                children.push(Self::node(kind, &f, &l, c));
+            } else if kind == SyntaxKind::Node {
+                let f = self.tok().clone();
+                self.take();
+                let c = self.node_decl();
+                let l = self.tokens[self.at.saturating_sub(1)].clone();
+                children.push(Self::node(kind, &f, &l, c));
+            } else {
+                let f = self.tok().clone();
+                let c = self.until_semicolon();
+                let l = self.tokens[self.at.saturating_sub(1)].clone();
+                children.push(Self::node(kind, &f, &l, c));
+            }
+            if self.at == before {
+                self.error("UFP2002", "unable to parse statement");
+                self.take();
+            }
+        }
+        let last = if self.is("}") {
+            self.take()
+        } else {
+            self.error("UFP2001", "expected `}`");
+            self.tok().clone()
+        };
+        Self::node(SyntaxKind::Block, &first, &last, children)
+    }
+    fn node_decl(&mut self) -> Vec<SyntaxNode> {
+        self.until_semicolon()
+    }
+    fn pipe_decl(&mut self) -> Vec<SyntaxNode> {
+        self.until_semicolon()
+    }
+    fn recover(&mut self) {
+        while !self.eof() && !self.is(";") && !self.is("}") {
+            self.take();
+        }
+        if self.is(";") {
+            self.take();
+        }
+    }
 }
 
 pub fn parse_plan(source: &str) -> Result<Plan, Vec<Diagnostic>> {
@@ -722,7 +1148,10 @@ mod tests {
     fn malformed_lexemes_have_valid_spans_and_recover() {
         let source = "é 0x 2e+ \"unfinished\noutput ok;";
         let (tokens, errors) = lex(source);
-        assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["UFP1003", "UFP1004", "UFP1004", "UFP1001"]);
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            ["UFP1003", "UFP1004", "UFP1004", "UFP1001"]
+        );
         for error in &errors {
             assert!(source.is_char_boundary(error.span.start));
             assert!(source.is_char_boundary(error.span.end));
@@ -739,5 +1168,45 @@ mod tests {
         assert_eq!(errors[0].code, "UFP1002");
         assert_eq!((errors[0].span.start, errors[0].span.end), (0, 6));
         assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_documented_example_corpus_into_ast() {
+        let examples = [
+            include_str!("../../../examples/generate.ufp"),
+            include_str!("../../../examples/gguf.ufp"),
+            include_str!("../../../examples/hello.ufp"),
+            include_str!("../../../examples/model_layers.ufp"),
+            include_str!("../../../examples/portal_demo.ufp"),
+            include_str!("../../../examples/predict.ufp"),
+            include_str!("../../../examples/quantized.ufp"),
+            include_str!("../../../examples/structured.ufp"),
+            include_str!("../../../examples/text_io.ufp"),
+        ];
+        for (i, source) in examples.iter().enumerate() {
+            parse_ast(source).unwrap_or_else(|errors| panic!("example {i}: {errors:#?}"));
+        }
+    }
+
+    #[test]
+    fn ast_retains_annotations_procedures_pins_statements_and_nodes() {
+        let ast = parse_ast("@T(0.1.2) procedure f(input matrix<2>[2,2] x, output float y) { let z = x[0,0]; if (z > 0) { y = z; } return y; } node n : pkg.op(x = f.(x)); pipe n.out -> n.in;").unwrap();
+        assert!(ast
+            .declarations
+            .iter()
+            .any(|n| n.kind == SyntaxKind::Procedure));
+        assert!(ast.declarations.iter().any(|n| n.kind == SyntaxKind::Node));
+        assert!(ast.declarations.iter().any(|n| n.kind == SyntaxKind::Pipe));
+        let proc = ast
+            .declarations
+            .iter()
+            .find(|n| n.kind == SyntaxKind::Procedure)
+            .unwrap();
+        assert!(proc
+            .children
+            .iter()
+            .any(|n| n.kind == SyntaxKind::Annotation));
+        assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Pin));
+        assert!(proc.children.iter().any(|n| n.kind == SyntaxKind::Block));
     }
 }
