@@ -77,9 +77,9 @@ pub fn emit_ggml_matmul_c() -> &'static str {
 
 /// Lower the supported initialized-f32-matrix UFP subset to native ggml C.
 ///
-/// It supports matrix literals and a single zero-argument procedure containing
-/// ordered `let` bindings over identifiers and `+`, `-`, `.*`, `*`, followed
-/// by a return. Matrix dimensions and literals use conventional row-major order.
+/// It supports top-level matrix literals plus a procedure with optional typed
+/// f32 matrix input/output pins, ordered `let` bindings over identifiers and
+/// `+`, `-`, `.*`, `*`, and a matrix return. Dimensions/literals are row-major.
 pub fn emit_ggml_matmul_ufp(source: &str) -> Result<String, String> {
     let ast = ufp_syntax::parse_ast(source).map_err(|errors| {
         errors
@@ -142,6 +142,13 @@ struct Value {
     shape: Shape,
 }
 
+#[derive(Clone, Debug)]
+struct InputArg {
+    name: String,
+    slot: usize,
+    shape: Shape,
+}
+
 fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
     let declarations: Vec<_> = ast
         .declarations
@@ -153,10 +160,7 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
         .iter()
         .filter(|n| n.kind == SyntaxKind::Procedure)
         .collect();
-    if declarations.is_empty()
-        || procedures.len() != 1
-        || ast.declarations.len() != declarations.len() + 1
-    {
+    if procedures.len() != 1 || ast.declarations.len() != declarations.len() + 1 {
         return Err(
             "ggml UFP slice requires one or more matrix declarations and one procedure".into(),
         );
@@ -179,7 +183,44 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
     }) {
         return Err("annotations are not supported by ggml UFP codegen".into());
     }
-    let (body, output, label) = parse_procedure(procedures[0], &matrices)?;
+    let (body, output, label, inputs, output_pin) = parse_procedure(procedures[0], &matrices)?;
+    if matrices.is_empty() && inputs.is_empty() {
+        return Err(
+            "ggml UFP slice requires a literal weight matrix or at least one typed input".into(),
+        );
+    }
+    if !inputs.is_empty() && output_pin.is_none() {
+        return Err("typed input procedures require exactly one typed output matrix pin".into());
+    }
+    if let Some((name, shape)) = &output_pin {
+        if *shape != output.shape {
+            return Err(format!(
+                "output pin `{name}` shape does not match returned matrix"
+            ));
+        }
+    }
+    let output_len = output
+        .shape
+        .rows
+        .checked_mul(output.shape.cols)
+        .ok_or("result matrix element count overflows")?;
+    let mut all_names: BTreeMap<&str, ()> =
+        matrices.iter().map(|m| (m.name.as_str(), ())).collect();
+    for input in &inputs {
+        if all_names.insert(&input.name, ()).is_some() {
+            return Err(format!(
+                "procedure input `{}` conflicts with another matrix name",
+                input.name
+            ));
+        }
+    }
+    if let Some((name, _)) = &output_pin {
+        if all_names.contains_key(name.as_str()) {
+            return Err(format!(
+                "output pin `{name}` conflicts with an input or weight matrix"
+            ));
+        }
+    }
     let mut c = String::from(
         "#include <stdio.h>\n#include <stddef.h>\n#include <ggml.h>\n#include <ggml-backend.h>\n#include <ggml-alloc.h>\n#include <ggml-cpu.h>\n",
     );
@@ -189,14 +230,37 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
             c_values(&matrix.values)
         ));
     }
+    let mut abi_params = Vec::new();
+    for input in &inputs {
+        abi_params.push(format!("const float *input_{}", input.name));
+        abi_params.push(format!("size_t input_{}_len", input.name));
+    }
+    abi_params.push("float *output".to_string());
+    abi_params.push("size_t output_len".to_string());
     c.push_str(&format!(
-        "#ifdef __cplusplus\nextern \"C\" {{\n#endif\nint ufp_execute(float *output, size_t output_len) {{\n  if (!output || output_len != {}) return 1;\n  struct ggml_init_params p = {{.mem_size=64*1024*1024, .mem_buffer=NULL, .no_alloc=true}};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n",
-        output.shape.rows * output.shape.cols
+        "#ifdef __cplusplus\nextern \"C\" {{\n#endif\nint ufp_execute({}) {{\n  if (!output || output_len != {}) return 1;\n",
+        abi_params.join(", "),
+        output_len
     ));
+    for input in &inputs {
+        c.push_str(&format!(
+            "  if (!input_{} || input_{}_len != {}) return 1;\n",
+            input.name,
+            input.name,
+            input.shape.rows * input.shape.cols
+        ));
+    }
+    c.push_str("  struct ggml_init_params p = {.mem_size=64*1024*1024, .mem_buffer=NULL, .no_alloc=true};\n  struct ggml_context *ctx=ggml_init(p); if(!ctx) return 1;\n");
     for (i, matrix) in matrices.iter().enumerate() {
         c.push_str(&format!(
             "  struct ggml_tensor *t_{i}=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n",
             matrix.cols, matrix.rows
+        ));
+    }
+    for input in &inputs {
+        c.push_str(&format!(
+            "  struct ggml_tensor *t_{}=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,{},{});\n",
+            input.slot, input.shape.cols, input.shape.rows
         ));
     }
     c.push_str(&body);
@@ -209,11 +273,34 @@ fn emit_matmul_ast(ast: &AstPlan) -> Result<String, String> {
             "  ggml_backend_tensor_set(t_{i},data_{i},0,sizeof(data_{i}));\n"
         ));
     }
+    for input in &inputs {
+        c.push_str(&format!(
+            "  ggml_backend_tensor_set(t_{},input_{},0,input_{}_len*sizeof(float));\n",
+            input.slot, input.name, input.name
+        ));
+    }
+    let mut main_init = String::new();
+    let mut main_args = Vec::new();
+    for input in &inputs {
+        let defaults = (1..=input.shape.rows * input.shape.cols)
+            .map(|v| v as f32)
+            .collect::<Vec<_>>();
+        main_init.push_str(&format!(
+            "  const float test_input_{}[] = {{{}}};\n",
+            input.slot,
+            c_values(&defaults)
+        ));
+        main_args.push(format!("test_input_{}", input.slot));
+        main_args.push(format!("{}", input.shape.rows * input.shape.cols));
+    }
+    main_args.push("result".to_string());
+    main_args.push(format!("{}", output.shape.rows * output.shape.cols));
     c.push_str(&format!(
-        "  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); ggml_backend_free(be); ggml_free(ctx); return 1; }}\n  ggml_backend_tensor_get(t_{},output,0,output_len*sizeof(float));\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n#ifdef __cplusplus\n}}\n#endif\n#ifndef UFP_NO_MAIN\nint main(void) {{\n  float result[{}]; if(ufp_execute(result,{})) return 1;\n  printf(\"{}: [\"); for(size_t r=0;r<{};++r) {{ if(r) printf(\", \"); printf(\"[\"); for(size_t col=0;col<{};++col) {{ if(col) printf(\", \"); printf(\"%.6g\",result[r*{}+col]); }} printf(\"]\"); }} puts(\"]\"); return 0;\n}}\n#endif\n",
+        "  if(ggml_backend_graph_compute(be,g)!=GGML_STATUS_SUCCESS) {{ fprintf(stderr,\"ggml compute failed\\\\n\"); ggml_backend_free(be); ggml_free(ctx); return 1; }}\n  ggml_backend_tensor_get(t_{},output,0,output_len*sizeof(float));\n  ggml_backend_free(be); ggml_free(ctx); return 0;\n}}\n#ifdef __cplusplus\n}}\n#endif\n#ifndef UFP_NO_MAIN\nint main(void) {{\n{}  float result[{}]; if(ufp_execute({})) return 1;\n  printf(\"{}: [\"); for(size_t r=0;r<{};++r) {{ if(r) printf(\", \"); printf(\"[\"); for(size_t col=0;col<{};++col) {{ if(col) printf(\", \"); printf(\"%.6g\",result[r*{}+col]); }} printf(\"]\"); }} puts(\"]\"); return 0;\n}}\n#endif\n",
         output.slot,
-        output.shape.rows * output.shape.cols,
-        output.shape.rows * output.shape.cols,
+        main_init,
+        output_len,
+        main_args.join(","),
         label,
         output.shape.rows,
         output.shape.cols,
@@ -351,9 +438,65 @@ fn parse_matrix_values(expr: &Expr) -> Result<(Vec<f32>, Option<(usize, usize)>)
 fn parse_procedure(
     node: &SyntaxNode,
     matrices: &[Matrix],
-) -> Result<(String, Value, String), String> {
-    if node.children.iter().any(|n| n.kind == SyntaxKind::Pin) {
-        return Err("ggml UFP slice currently supports only zero-argument procedures".into());
+) -> Result<
+    (
+        String,
+        Value,
+        String,
+        Vec<InputArg>,
+        Option<(String, Shape)>,
+    ),
+    String,
+> {
+    let mut inputs = Vec::new();
+    let mut output_pin = None;
+    let pins = node
+        .children
+        .iter()
+        .filter(|n| n.kind == SyntaxKind::Pin)
+        .collect::<Vec<_>>();
+    for pin in &pins {
+        let direction = pin
+            .children
+            .iter()
+            .find_map(|child| child.token.as_ref().map(|token| token.text.as_str()))
+            .ok_or("procedure pin must specify input or output")?;
+        let name = pin
+            .children
+            .iter()
+            .find(|child| child.kind == SyntaxKind::Identifier)
+            .and_then(|child| child.token.as_ref())
+            .map(|token| token.text.clone())
+            .ok_or("procedure matrix pin requires a name")?;
+        let shape = shape_from_type(
+            pin.type_ast
+                .as_ref()
+                .ok_or("procedure pin requires a type")?,
+        )?;
+        match direction {
+            "input" => inputs.push(InputArg {
+                name,
+                slot: matrices.len() + inputs.len(),
+                shape,
+            }),
+            "output" => {
+                if output_pin.replace((name, shape)).is_some() {
+                    return Err("only one output matrix pin is supported".into());
+                }
+            }
+            "inout" => return Err("inout matrix pins are not supported".into()),
+            _ => {
+                return Err(format!(
+                    "procedure pin direction `{direction}` is unsupported"
+                ))
+            }
+        }
+    }
+    if !pins.is_empty() && (inputs.is_empty() || output_pin.is_none()) {
+        return Err(
+            "pinned procedures require one or more input matrices and exactly one output matrix"
+                .into(),
+        );
     }
     let name = node
         .children
@@ -392,6 +535,22 @@ fn parse_procedure(
             },
         );
     }
+    for input in &inputs {
+        if env.contains_key(&input.name) {
+            return Err(format!(
+                "procedure input `{}` conflicts with a top-level matrix",
+                input.name
+            ));
+        }
+        env.insert(
+            input.name.clone(),
+            Value {
+                slot: input.slot,
+                shape: input.shape,
+            },
+        );
+        next_slot += 1;
+    }
     let mut code = String::new();
     for statement in &statements[..statements.len() - 1] {
         if statement.kind != SyntaxKind::Let {
@@ -426,7 +585,32 @@ fn parse_procedure(
         _ => "out".into(),
     };
     let result = emit_expr(return_expr, &env, &mut next_slot, &mut code)?;
-    Ok((code, result, label))
+    Ok((code, result, label, inputs, output_pin))
+}
+
+fn shape_from_type(ty: &TypeAst) -> Result<Shape, String> {
+    let TypeAst::Matrix {
+        rank: Some(rank),
+        dimensions,
+        element: Some(element),
+        ..
+    } = ty
+    else {
+        return Err("procedure pins must use `matrix<2>[rows,cols] of float<32>`".into());
+    };
+    if rank != "2" || !is_f32(element) || dimensions.len() != 2 {
+        return Err("procedure pins support only rank-2 `float<32>` matrices".into());
+    }
+    let rows = dimensions[0]
+        .parse::<usize>()
+        .map_err(|_| "procedure pin dimensions must be positive integer literals")?;
+    let cols = dimensions[1]
+        .parse::<usize>()
+        .map_err(|_| "procedure pin dimensions must be positive integer literals")?;
+    if rows == 0 || cols == 0 || rows.checked_mul(cols).is_none() {
+        return Err("procedure pin dimensions must be positive and non-overflowing".into());
+    }
+    Ok(Shape { rows, cols })
 }
 
 fn check_declared_shape(ty: &TypeAst, shape: Shape) -> Result<(), String> {
@@ -602,5 +786,41 @@ mod tests {
         assert!(emit_ggml_matmul_ufp(&source)
             .unwrap_err()
             .contains("equal matrix shapes"));
+    }
+
+    #[test]
+    fn emits_typed_input_buffer_abi_with_length_checks() {
+        let source = include_str!("../../../examples/ggml_input_abi.ufp");
+        let c = emit_ggml_matmul_ufp(source).unwrap();
+        assert!(c.contains(
+            "int ufp_execute(const float *input_x, size_t input_x_len, float *output, size_t output_len)"
+        ));
+        assert!(c.contains("input_x_len != 6"));
+        assert!(c.contains("output_len != 4"));
+    }
+
+    #[test]
+    fn rejects_unsupported_pin_types_and_control_flow() {
+        let source = include_str!("../../../examples/ggml_input_abi.ufp");
+        let bad_type = source.replace("float<32> x", "float<16> x");
+        assert!(emit_ggml_matmul_ufp(&bad_type)
+            .unwrap_err()
+            .contains("float<32>"));
+
+        let control_flow = source.replace(
+            "    let result = x * w;",
+            "    if (true) { let result = x * w; }",
+        );
+        assert!(emit_ggml_matmul_ufp(&control_flow)
+            .unwrap_err()
+            .contains("sequential `let`"));
+
+        let wrong_output = source.replace(
+            "output matrix<2>[2,2] of float<32> out",
+            "output matrix<2>[1,4] of float<32> out",
+        );
+        assert!(emit_ggml_matmul_ufp(&wrong_output)
+            .unwrap_err()
+            .contains("output pin"));
     }
 }
